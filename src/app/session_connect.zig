@@ -101,6 +101,9 @@ fn probeAlive(fd: posix.fd_t) bool {
 
 pub fn tryConnect(path: []const u8) ?posix.fd_t {
     const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch return null;
+    // Enlarge receive buffer so rapid daemon output doesn't overflow the
+    // kernel buffer while the PTY thread is between poll cycles.
+    setRecvBuf(fd, 256 * 1024);
     const addr = std.net.Address.initUnix(path) catch {
         posix.close(fd);
         return null;
@@ -232,4 +235,9 @@ pub fn setNonBlocking(fd: posix.fd_t) void {
     const F_SETFL: i32 = 4;
     const flags = std.posix.fcntl(fd, F_GETFL, 0) catch return;
     _ = std.posix.fcntl(fd, F_SETFL, flags | platform.O_NONBLOCK) catch {};
+}
+
+fn setRecvBuf(fd: posix.fd_t, size: u32) void {
+    const val: [4]u8 = @bitCast(size);
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVBUF, &val) catch {};
 }

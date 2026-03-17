@@ -106,9 +106,14 @@ pub const DaemonClient = struct {
 
     /// Write all bytes to the client socket, handling partial writes.
     /// The socket is non-blocking; on WouldBlock we briefly poll for
-    /// writability.  If the client can't drain data within ~200ms the
+    /// writability.  If the client can't drain data within ~2s the
     /// connection is considered dead (prevents the daemon from blocking
     /// indefinitely when a client's recv buffer is full).
+    ///
+    /// The generous timeout (2s) combined with enlarged SO_SNDBUF (256KB)
+    /// prevents the daemon from killing clients during rapid output bursts
+    /// (e.g. nx test runners). Premature client death causes reconnect +
+    /// replay, which can leave stale content on screen.
     fn writeAll(self: *DaemonClient, data: []const u8) void {
         const POLLOUT: i16 = 0x0004;
         var offset: usize = 0;
@@ -117,7 +122,7 @@ pub const DaemonClient = struct {
             const n = posix.write(self.socket_fd, data[offset..]) catch |err| {
                 if (err == error.WouldBlock) {
                     stalls += 1;
-                    if (stalls > 20) { // 20 × 10ms = 200ms
+                    if (stalls > 200) { // 200 × 10ms = 2s
                         self.dead = true;
                         return;
                     }
@@ -207,26 +212,45 @@ pub const DaemonClient = struct {
         }
     }
 
-    /// Skip past a partial CSI escape sequence at the start of replay data.
+    /// Skip past a partial escape sequence at the start of replay data.
+    /// The ring buffer can wrap mid-sequence, leaving a tail without the
+    /// leading ESC. We detect CSI (`[`), OSC (`]`), DCS (`P`), and APC (`_`)
+    /// tails so they aren't rendered as literal text.
     /// Returns the number of bytes to skip (0 if no partial sequence detected).
     fn skipPartialEscape(data: []const u8) usize {
         if (data.len == 0) return 0;
-        var i: usize = 0;
+        const first = data[0];
 
-        // `[` at start means ESC was the last byte before the wrap point.
-        if (data[0] == '[') i = 1;
-
-        // Expect CSI parameter bytes (0x30-0x3F: digits, ;, ?, etc.)
-        if (i >= data.len or data[i] < 0x30 or data[i] > 0x3f) return 0;
-
-        const limit = @min(data.len, 64);
-        while (i < limit) : (i += 1) {
-            const b = data[i];
-            if (b >= 0x30 and b <= 0x3f) continue; // CSI param
-            if (b >= 0x20 and b <= 0x2f) continue; // CSI intermediate
-            if (b >= 0x40 and b <= 0x7e) return i + 1; // CSI final byte
-            return 0; // Not a CSI sequence
+        // CSI tail: `[` followed by parameter/intermediate/final bytes.
+        // ESC was the last byte before the wrap point.
+        if (first == '[') {
+            var i: usize = 1;
+            const limit = @min(data.len, 64);
+            while (i < limit) : (i += 1) {
+                const b = data[i];
+                if (b >= 0x30 and b <= 0x3f) continue; // CSI param
+                if (b >= 0x20 and b <= 0x2f) continue; // CSI intermediate
+                if (b >= 0x40 and b <= 0x7e) return i + 1; // CSI final byte
+                return 0;
+            }
+            return 0;
         }
+
+        // OSC tail (`]`), DCS tail (`P`), APC tail (`_`):
+        // These are string-type sequences terminated by BEL (0x07) or ST (ESC \).
+        // Skip everything up to and including the terminator.
+        if (first == ']' or first == 'P' or first == '_') {
+            var i: usize = 1;
+            const limit = @min(data.len, 4096); // OSC can be long (e.g. base64 images)
+            while (i < limit) : (i += 1) {
+                if (data[i] == 0x07) return i + 1; // BEL terminator
+                if (data[i] == 0x1b and i + 1 < data.len and data[i + 1] == '\\') return i + 2; // ST
+            }
+            // No terminator found within limit — skip the entire prefix to
+            // avoid dumping a huge partial sequence as literal text.
+            return @min(data.len, limit);
+        }
+
         return 0;
     }
 
@@ -389,3 +413,54 @@ pub const DaemonClient = struct {
         self.* = undefined;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Tests for skipPartialEscape
+// ---------------------------------------------------------------------------
+
+test "skipPartialEscape: empty data" {
+    try std.testing.expectEqual(@as(usize, 0), DaemonClient.skipPartialEscape(""));
+}
+
+test "skipPartialEscape: plain text" {
+    try std.testing.expectEqual(@as(usize, 0), DaemonClient.skipPartialEscape("hello world"));
+}
+
+test "skipPartialEscape: CSI tail with [" {
+    // ESC was before wrap, data starts with "[0m" (SGR reset)
+    try std.testing.expectEqual(@as(usize, 3), DaemonClient.skipPartialEscape("[0m"));
+    // CSI with params: "[48;2;30;30;40m"
+    try std.testing.expectEqual(@as(usize, 15), DaemonClient.skipPartialEscape("[48;2;30;30;40m"));
+    // CSI cursor home: "[H"
+    try std.testing.expectEqual(@as(usize, 2), DaemonClient.skipPartialEscape("[H"));
+    // CSI with ? param: "[?25l"
+    try std.testing.expectEqual(@as(usize, 5), DaemonClient.skipPartialEscape("[?25l"));
+}
+
+test "skipPartialEscape: CSI tail not a CSI" {
+    // [ followed by a control byte (not param/intermediate/final)
+    try std.testing.expectEqual(@as(usize, 0), DaemonClient.skipPartialEscape("[\x01hello"));
+}
+
+test "skipPartialEscape: OSC tail" {
+    // ESC was before wrap, data starts with "]" (OSC)
+    // OSC 7 with BEL terminator: "]7;file:///tmp" = 14 bytes, BEL at 14 → skip 15
+    try std.testing.expectEqual(@as(usize, 15), DaemonClient.skipPartialEscape("]7;file:///tmp\x07abc"));
+    // OSC with ST terminator (ESC \): BEL replaced by ESC \ → skip 16
+    try std.testing.expectEqual(@as(usize, 16), DaemonClient.skipPartialEscape("]7;file:///tmp\x1b\\abc"));
+}
+
+test "skipPartialEscape: DCS tail" {
+    // "Pq#0" = 4 bytes, then ESC \ at indices 4-5 → skip 6
+    try std.testing.expectEqual(@as(usize, 6), DaemonClient.skipPartialEscape("Pq#0\x1b\\xy"));
+}
+
+test "skipPartialEscape: APC tail" {
+    try std.testing.expectEqual(@as(usize, 6), DaemonClient.skipPartialEscape("_test\x07rest"));
+}
+
+test "skipPartialEscape: digit at start is not a false CSI match" {
+    // Plain text starting with digits must NOT be treated as a CSI tail
+    try std.testing.expectEqual(@as(usize, 0), DaemonClient.skipPartialEscape("123abc"));
+    try std.testing.expectEqual(@as(usize, 0), DaemonClient.skipPartialEscape("42"));
+}
