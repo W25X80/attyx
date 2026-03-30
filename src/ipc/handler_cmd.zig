@@ -14,6 +14,7 @@ const actions = @import("../app/ui/actions.zig");
 const split_actions = @import("../app/ui/split_actions.zig");
 const statusbar = @import("../app/statusbar.zig");
 const popup_mod = @import("../app/popup.zig");
+const tab_rename = @import("tab_rename.zig");
 
 const handler = @import("handler.zig");
 const sendOk = handler.sendOk;
@@ -406,11 +407,14 @@ pub fn handleTabCloseTargeted(cmd: *queue.IpcCommand, ctx: *PtyThreadCtx) void {
 
 /// Rename a specific tab. Payload: [tab_idx:u8][name...]
 pub fn handleTabRenameTargeted(cmd: *queue.IpcCommand, ctx: *PtyThreadCtx) void {
-    if (cmd.payload_len < 1) {
-        sendError(cmd, "missing tab index");
+    const payload = tab_rename.parseTargetedPayload(cmd.payload[0..cmd.payload_len]) catch |err| {
+        switch (err) {
+            error.MissingTabIndex => sendError(cmd, "missing tab index"),
+            error.MissingTabTitle => sendError(cmd, "missing tab title"),
+        }
         return;
-    }
-    const ti = cmd.payload[0];
+    };
+    const ti = payload.tab_idx;
     if (ti >= ctx.tab_mgr.count) {
         sendError(cmd, "tab not found");
         return;
@@ -419,8 +423,7 @@ pub fn handleTabRenameTargeted(cmd: *queue.IpcCommand, ctx: *PtyThreadCtx) void 
         sendError(cmd, "tab not found");
         return;
     });
-    const name = cmd.payload[1..cmd.payload_len];
-    layout.setTitle(name);
+    layout.setTitle(payload.name);
     actions.saveSessionLayout(ctx);
     sendOk(cmd, "");
 }

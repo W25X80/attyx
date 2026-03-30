@@ -16,6 +16,7 @@ const actions = @import("../app/ui/actions.zig");
 
 const handler_cmd = @import("handler_cmd.zig");
 const handler_query = @import("handler_query.zig");
+const tab_rename = @import("tab_rename.zig");
 
 /// Process one IPC command. Writes response to cmd.response_fd, then
 /// closes it.
@@ -89,7 +90,10 @@ pub fn handle(cmd: *queue.IpcCommand, ctx: *PtyThreadCtx) void {
             sendOk(cmd, "");
         },
         .tab_rename => {
-            const name = cmd.payload[0..cmd.payload_len];
+            const name = tab_rename.parseActivePayload(cmd.payload[0..cmd.payload_len]) catch {
+                sendError(cmd, "missing tab title");
+                return;
+            };
             ctx.tab_mgr.activeLayout().setTitle(name);
             actions.saveSessionLayout(ctx);
             sendOk(cmd, "");

@@ -13,6 +13,7 @@ const event_loop = @import("../app/ui/event_loop_windows.zig");
 const WinCtx = event_loop.WinCtx;
 const Pane = @import("../app/pane.zig").Pane;
 const session_win = @import("../app/session_windows.zig");
+const tab_rename = @import("tab_rename.zig");
 
 extern fn attyx_dispatch_action(action_raw: u8) u8;
 extern fn attyx_send_input(bytes: [*]const u8, len: c_int) void;
@@ -58,7 +59,11 @@ pub fn handle(cmd: *queue.IpcCommand, ctx: *WinCtx) void {
             sendOk(cmd, "");
         },
         .tab_rename => {
-            ctx.tab_mgr.activeLayout().setTitle(cmd.payload[0..cmd.payload_len]);
+            const name = tab_rename.parseActivePayload(cmd.payload[0..cmd.payload_len]) catch {
+                sendError(cmd, "missing tab title");
+                return;
+            };
+            ctx.tab_mgr.activeLayout().setTitle(name);
             event_loop.saveLayoutToDaemon(ctx);
             sendOk(cmd, "");
         },
@@ -714,11 +719,14 @@ fn handleThemeSet(cmd: *queue.IpcCommand, ctx: *WinCtx) void {
 // ── Targeted operations ──
 
 fn handleTabRenameTargeted(cmd: *queue.IpcCommand, ctx: *WinCtx) void {
-    if (cmd.payload_len < 1) {
-        sendError(cmd, "missing tab index");
+    const payload = tab_rename.parseTargetedPayload(cmd.payload[0..cmd.payload_len]) catch |err| {
+        switch (err) {
+            error.MissingTabIndex => sendError(cmd, "missing tab index"),
+            error.MissingTabTitle => sendError(cmd, "missing tab title"),
+        }
         return;
-    }
-    const ti = cmd.payload[0];
+    };
+    const ti = payload.tab_idx;
     if (ti >= ctx.tab_mgr.count) {
         sendError(cmd, "tab not found");
         return;
@@ -727,8 +735,7 @@ fn handleTabRenameTargeted(cmd: *queue.IpcCommand, ctx: *WinCtx) void {
         sendError(cmd, "tab not found");
         return;
     });
-    const name = cmd.payload[1..cmd.payload_len];
-    layout.setTitle(name);
+    layout.setTitle(payload.name);
     event_loop.saveLayoutToDaemon(ctx);
     sendOk(cmd, "");
 }
