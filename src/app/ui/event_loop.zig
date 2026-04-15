@@ -897,6 +897,7 @@ pub fn ptyReaderThread(ctx: *PtyThreadCtx) void {
                                 @intCast(@max(selected, 0)),
                                 @intCast(@max(scroll_off, 0)),
                                 @intCast(@max(total, 0)),
+                                ctx.tab_mgr.activePane().ipc_id,
                             );
 
                             // Render and set on overlay
@@ -1097,10 +1098,21 @@ pub fn ptyReaderThread(ctx: *PtyThreadCtx) void {
             publish.generateTabBar(ctx);
             publish.generateStatusbar(ctx);
             publish.publishNativeTabTitles(ctx);
-            // Reposition cursor-anchored overlays (completion dropdown)
+            // Reposition cursor-anchored overlays (completion dropdown).
+            // Dismiss if focus has moved away from the xyron source pane
+            // (pane/tab/session switch) — completions are per-pane state.
             if (ctx.overlay_mgr) |mgr| {
                 if (ctx.xyron_completion.active) {
-                    mgr.relayoutAnchored(publish.viewportInfoFromCtx(ctx));
+                    const active_id = ctx.tab_mgr.activePane().ipc_id;
+                    if (ctx.xyron_completion.source_pane_id != active_id) {
+                        ctx.xyron_completion.dismiss();
+                        mgr.hide(.completion);
+                    } else if (publish.viewportInfoForPane(ctx, ctx.xyron_completion.source_pane_id)) |vp| {
+                        mgr.relayoutAnchored(vp);
+                    } else {
+                        ctx.xyron_completion.dismiss();
+                        mgr.hide(.completion);
+                    }
                 }
             }
             publish.publishOverlays(ctx);
