@@ -105,8 +105,19 @@ volatile int g_detected_url_end_col = 0;
 
 volatile uint64_t g_dirty[4] = {0,0,0,0};
 
-volatile int g_pending_resize_rows = 0;
-volatile int g_pending_resize_cols = 0;
+_Atomic uint64_t g_resize_req  = 0;
+_Atomic uint32_t g_metrics_gen = 0;
+
+// Arm a scale-reason rebuild unless a rebuild is already pending. CAS from
+// 0 so a concurrent FONT store (value 1, PTY thread on config reload)
+// always wins: FONT is the stronger reason — it also rasterizes at the
+// live scale and additionally applies the user's size change.
+static void attyx_arm_scale_rebuild(void) {
+    int expected = 0;
+    __atomic_compare_exchange_n(&g_needs_font_rebuild, &expected,
+                                ATTYX_REBUILD_SCALE, false,
+                                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+}
 
 // Set by a notification click (main thread) to the agent pane's ipc_id; the
 // event loop polls attyx_check_focus_request() and switches to its tab.
@@ -209,14 +220,24 @@ void attyx_end_cell_update(void) {
 }
 
 int attyx_check_resize(int* out_rows, int* out_cols) {
-    int pr = g_pending_resize_rows;
-    int pc = g_pending_resize_cols;
-    if (pr <= 0 || pc <= 0) return 0;
-    if (pr == g_rows && pc == g_cols) return 0;
+    // Load order matters: the word first, the generation second. The
+    // publisher bumps the generation before storing the word, so a word
+    // whose generation is visible here can never be fresher than cur_gen —
+    // fresh requests are never misjudged stale.
+    uint64_t word = atomic_load_explicit(&g_resize_req, memory_order_acquire);
+    if (word == 0) return 0;
+    uint32_t gen;
+    int pr, pc;
+    attyx_resize_unpack(word, &gen, &pr, &pc);
+    uint32_t cur_gen = atomic_load_explicit(&g_metrics_gen, memory_order_acquire);
+    int stale = (gen != cur_gen) || pr <= 0 || pc <= 0;
+    int noop  = (pr == g_rows && pc == g_cols);
+    // Drain exactly the loaded word; if a newer word already replaced it,
+    // the CAS fails and the newer request survives for the next poll.
+    atomic_compare_exchange_strong(&g_resize_req, &word, 0);
+    if (stale || noop) return 0;
     *out_rows = pr;
     *out_cols = pc;
-    g_pending_resize_rows = 0;
-    g_pending_resize_cols = 0;
     return 1;
 }
 
@@ -538,15 +559,17 @@ void attyx_spawn_new_window(void) {
     {
         CGFloat viewW = termView.bounds.size.width;
         CGFloat viewH = termView.bounds.size.height;
-        int new_cols = (int)((viewW - g_padding_left - g_padding_right) / g_cell_pt_w + 0.001f);
-        int new_rows = (int)((viewH - g_padding_top - g_padding_bottom) / g_cell_pt_h + 0.001f);
-        if (new_cols < 1) new_cols = 1;
-        if (new_rows < 1) new_rows = 1;
-        if (new_cols > ATTYX_MAX_COLS) new_cols = ATTYX_MAX_COLS;
-        if (new_rows > ATTYX_MAX_ROWS) new_rows = ATTYX_MAX_ROWS;
+        int new_cols = attyx_cells_fit((float)viewW, (float)g_padding_left,
+                                       (float)g_padding_right, (float)g_cell_pt_w,
+                                       ATTYX_MAX_COLS);
+        int new_rows = attyx_cells_fit((float)viewH, (float)g_padding_top,
+                                       (float)g_padding_bottom, (float)g_cell_pt_h,
+                                       ATTYX_MAX_ROWS);
         if (new_cols != g_cols || new_rows != g_rows) {
-            g_pending_resize_rows = new_rows;
-            g_pending_resize_cols = new_cols;
+            uint32_t gen = atomic_load_explicit(&g_metrics_gen, memory_order_relaxed);
+            atomic_store_explicit(&g_resize_req,
+                                  attyx_resize_pack(gen, new_rows, new_cols),
+                                  memory_order_release);
         }
     }
 
@@ -626,12 +649,16 @@ void attyx_spawn_new_window(void) {
 - (void)windowDidChangeScreen:(NSNotification*)notification {
     (void)notification;
     [self fitWindowToCurrentScreen];
-    g_needs_font_rebuild = 1;
+    attyx_arm_scale_rebuild();
 }
 
 - (void)windowDidChangeBackingProperties:(NSNotification*)notification {
     (void)notification;
-    g_needs_font_rebuild = 1;
+    // Load-bearing arm: AttyxView's viewDidChangeBackingProperties arms only
+    // when it observes a layer-scale delta, which some AppKit builds pre-sync
+    // away. This unconditional window-level arm must not be removed as
+    // "redundant".
+    attyx_arm_scale_rebuild();
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {

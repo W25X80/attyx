@@ -16,4 +16,5 @@ test {
     _ = @import("tests/erase.zig");
     _ = @import("tests/state_resize_extra.zig");
     _ = @import("tests/resize_rounding.zig");
+    _ = @import("tests/resize_scale_coherence.zig");
 }

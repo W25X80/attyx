@@ -48,7 +48,8 @@
 @property (nonatomic, strong) id<MTLRenderPipelineState> colorPipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> imagePipeline;
 - (void)drawFrameImpl:(MTKView*)view;
-- (void)rebuildFont:(MTKView*)view;
+- (void)rebuildFont:(MTKView*)view reason:(int)reason;
+- (void)publishResize:(int)rows cols:(int)cols;
 - (void)printStatsIfNeeded;
 @end
 

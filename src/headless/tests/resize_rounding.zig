@@ -14,8 +14,8 @@
 const std = @import("std");
 
 /// Mirror of the platform formula. Keep eps in sync with the value used in
-/// macos_renderer.m, platform_macos.m, platform_linux.c, linux_input.c, and
-/// platform_windows.c.
+/// src/app/resize_req.h (attyx_cells_fit — macOS) and in platform_linux.c,
+/// linux_input.c, and platform_windows.c.
 fn computeCells(fb: f32, pad: f32, cell: f32) i32 {
     const eps: f32 = 0.001;
     const n = @as(i32, @intFromFloat((fb - pad) / cell + eps));

@@ -5,6 +5,7 @@
 #import <MetalKit/MetalKit.h>
 #import <Carbon/Carbon.h>
 #include <string.h>
+#include <math.h>
 #include "macos_internal.h"
 #include "macos_input_private.h"
 
@@ -331,6 +332,27 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
                owner:self
             userInfo:nil];
     [self addTrackingArea:ta];
+}
+
+// Keep the Metal layer's scale in lockstep with the window and rebuild the
+// glyph cache when the scale actually changed. MTKView does the layer sync
+// itself on healthy AppKit builds; doing it explicitly removes the
+// dependency on undocumented ordering between backing-change and
+// drawable-size callbacks. The rebuild is conditional: this notification
+// also fires on first window attachment, where scales already match —
+// arming there would rasterize the glyph atlas twice on every launch.
+- (void)viewDidChangeBackingProperties {
+    CGFloat before = self.layer.contentsScale;
+    [super viewDidChangeBackingProperties];
+    NSWindow* w = self.window;
+    if (!w) return;
+    self.layer.contentsScale = w.backingScaleFactor;
+    if (fabs((double)before - (double)w.backingScaleFactor) > 0.001) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&g_needs_font_rebuild, &expected,
+                                    ATTYX_REBUILD_SCALE, false,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
 }
 
 - (void)mouseDown:(NSEvent *)event {
