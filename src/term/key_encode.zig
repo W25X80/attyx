@@ -148,23 +148,23 @@ fn encodeXterm(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const 
         .escape => return writeStr(out, "\x1b"),
 
         .up, .down, .left, .right => {
-            return encodeArrow(event.key, mods, enc_state.cursor_keys_app, out);
+            return encodeArrow(event.key, mods, enc_state.cursor_keys_app, .press, out);
         },
 
         .home, .end => {
-            return encodeHomeEnd(event.key, mods, out);
+            return encodeHomeEnd(event.key, mods, .press, out);
         },
 
         .f1, .f2, .f3, .f4 => {
-            return encodeFKey1to4(event.key, mods, out);
+            return encodeFKey1to4(event.key, mods, .press, out);
         },
 
         .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 => {
-            return encodeFKey5to12(event.key, mods, out);
+            return encodeFKey5to12(event.key, mods, .press, out);
         },
 
         .page_up, .page_down, .insert, .delete => {
-            return encodeTildeKey(event.key, mods, out);
+            return encodeTildeKey(event.key, mods, .press, out);
         },
 
         .kp_0, .kp_1, .kp_2, .kp_3, .kp_4, .kp_5, .kp_6, .kp_7, .kp_8, .kp_9, .kp_decimal, .kp_divide, .kp_multiply, .kp_minus, .kp_plus, .kp_enter, .kp_equal => {
@@ -177,7 +177,7 @@ fn encodeXterm(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const 
     }
 }
 
-fn encodeArrow(key: KeyCode, mods: Modifiers, app_mode: bool, out: *[128]u8) []const u8 {
+fn encodeArrow(key: KeyCode, mods: Modifiers, app_mode: bool, event: EventType, out: *[128]u8) []const u8 {
     const letter: u8 = switch (key) {
         .up => 'A',
         .down => 'B',
@@ -185,6 +185,12 @@ fn encodeArrow(key: KeyCode, mods: Modifiers, app_mode: bool, out: *[128]u8) []c
         .left => 'D',
         else => unreachable,
     };
+
+    // Non-press events (kitty event_types flag) carry the event sub-param
+    // and always use the CSI numbered form, never SS3.
+    if (event != .press) {
+        return bufPrint(out, "\x1b[1;{d}:{d}{c}", .{ mods.toCSI(), @intFromEnum(event), letter });
+    }
 
     if (mods.any()) {
         // Modified: ESC[1;{mod}X
@@ -206,8 +212,11 @@ fn encodeArrow(key: KeyCode, mods: Modifiers, app_mode: bool, out: *[128]u8) []c
     return out[0..3];
 }
 
-fn encodeHomeEnd(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
+fn encodeHomeEnd(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8) []const u8 {
     const letter: u8 = if (key == .home) 'H' else 'F';
+    if (event != .press) {
+        return bufPrint(out, "\x1b[1;{d}:{d}{c}", .{ mods.toCSI(), @intFromEnum(event), letter });
+    }
     if (mods.any()) {
         return bufPrint(out, "\x1b[1;{d}{c}", .{ mods.toCSI(), letter });
     }
@@ -217,7 +226,14 @@ fn encodeHomeEnd(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
     return out[0..3];
 }
 
-fn encodeFKey1to4(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
+fn encodeFKey1to4(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8) []const u8 {
+    // F3's letter form (CSI R) collides with the Cursor Position Report;
+    // kitty encodes any parameterized F3 as CSI 13 ~ (the spec removed the
+    // CSI R form). crossterm routes digit-prefixed R-final sequences to its
+    // CPR parser, which would silently drop CSI 1;1:3 R.
+    if (key == .f3 and event != .press) {
+        return bufPrint(out, "\x1b[13;{d}:{d}~", .{ mods.toCSI(), @intFromEnum(event) });
+    }
     const letter: u8 = switch (key) {
         .f1 => 'P',
         .f2 => 'Q',
@@ -225,6 +241,9 @@ fn encodeFKey1to4(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
         .f4 => 'S',
         else => unreachable,
     };
+    if (event != .press) {
+        return bufPrint(out, "\x1b[1;{d}:{d}{c}", .{ mods.toCSI(), @intFromEnum(event), letter });
+    }
     if (mods.any()) {
         return bufPrint(out, "\x1b[1;{d}{c}", .{ mods.toCSI(), letter });
     }
@@ -234,7 +253,7 @@ fn encodeFKey1to4(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
     return out[0..3];
 }
 
-fn encodeFKey5to12(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
+fn encodeFKey5to12(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8) []const u8 {
     const code: u8 = switch (key) {
         .f5 => 15,
         .f6 => 17,
@@ -246,13 +265,16 @@ fn encodeFKey5to12(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
         .f12 => 24,
         else => unreachable,
     };
+    if (event != .press) {
+        return bufPrint(out, "\x1b[{d};{d}:{d}~", .{ code, mods.toCSI(), @intFromEnum(event) });
+    }
     if (mods.any()) {
         return bufPrint(out, "\x1b[{d};{d}~", .{ code, mods.toCSI() });
     }
     return bufPrint(out, "\x1b[{d}~", .{code});
 }
 
-fn encodeTildeKey(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
+fn encodeTildeKey(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8) []const u8 {
     const code: u8 = switch (key) {
         .page_up => 5,
         .page_down => 6,
@@ -260,6 +282,9 @@ fn encodeTildeKey(key: KeyCode, mods: Modifiers, out: *[128]u8) []const u8 {
         .delete => 3,
         else => unreachable,
     };
+    if (event != .press) {
+        return bufPrint(out, "\x1b[{d};{d}:{d}~", .{ code, mods.toCSI(), @intFromEnum(event) });
+    }
     if (mods.any()) {
         return bufPrint(out, "\x1b[{d};{d}~", .{ code, mods.toCSI() });
     }
@@ -379,44 +404,69 @@ fn encodeCodepoint(cp: u21, mods: Modifiers, out: *[128]u8) []const u8 {
 fn encodeKitty(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const u8 {
     const flags = enc_state.kitty_flags;
 
-    // Without event_types flag, drop release but treat repeat as press
+    // Without the event_types flag: drop release, treat repeat as press.
+    var ev = event;
     if (flags & KITTY_EVENT_TYPES == 0) {
-        if (event.event_type == .release) return out[0..0];
+        if (ev.event_type == .release) return out[0..0];
+        if (ev.event_type == .repeat) ev.event_type = .press;
     }
 
     // all_keys flag: everything uses CSI u format
     if (flags & KITTY_ALL_KEYS != 0) {
-        return encodeKittyCSIu(event, enc_state, out);
+        return encodeKittyCSIu(ev, enc_state, out);
     }
 
-    // disambiguate flag: only ambiguous keys use CSI u
+    // Enter/Tab/Backspace never get release events unless all_keys is set —
+    // "so that the user can still type reset at a shell prompt when a
+    // program that sets this mode ends without resetting it" (kitty spec,
+    // Report event types).
+    if (ev.event_type == .release) {
+        switch (ev.key) {
+            .enter, .tab, .backspace => return out[0..0],
+            else => {},
+        }
+    }
+
+    // disambiguate flag: only ambiguous keys use CSI u.
+    // Functional keys keep their legacy sequences; non-press events carry
+    // the :{event} sub-parameter (parameterized legacy form).
     if (flags & KITTY_DISAMBIGUATE != 0) {
-        // Special keys still use their traditional sequences with modifiers
-        switch (event.key) {
+        switch (ev.key) {
             .up, .down, .left, .right => {
-                return encodeArrow(event.key, event.mods, enc_state.cursor_keys_app, out);
+                return encodeArrow(ev.key, ev.mods, enc_state.cursor_keys_app, ev.event_type, out);
             },
-            .home, .end => return encodeHomeEnd(event.key, event.mods, out),
-            .f1, .f2, .f3, .f4 => return encodeFKey1to4(event.key, event.mods, out),
-            .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 => return encodeFKey5to12(event.key, event.mods, out),
-            .page_up, .page_down, .insert, .delete => return encodeTildeKey(event.key, event.mods, out),
+            .home, .end => return encodeHomeEnd(ev.key, ev.mods, ev.event_type, out),
+            .f1, .f2, .f3, .f4 => return encodeFKey1to4(ev.key, ev.mods, ev.event_type, out),
+            .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 => return encodeFKey5to12(ev.key, ev.mods, ev.event_type, out),
+            .page_up, .page_down, .insert, .delete => return encodeTildeKey(ev.key, ev.mods, ev.event_type, out),
             // Numpad keys always use CSI u in Kitty (distinct codepoints)
             .kp_0, .kp_1, .kp_2, .kp_3, .kp_4, .kp_5, .kp_6, .kp_7, .kp_8, .kp_9, .kp_decimal, .kp_divide, .kp_multiply, .kp_minus, .kp_plus, .kp_enter, .kp_equal => {
-                return encodeKittyCSIu(event, enc_state, out);
+                return encodeKittyCSIu(ev, enc_state, out);
             },
             // Ambiguous keys use CSI u
             .enter, .tab, .backspace, .escape, .codepoint => {
-                return encodeKittyCSIu(event, enc_state, out);
+                return encodeKittyCSIu(ev, enc_state, out);
             },
         }
     }
 
-    // Just event_types flag but no disambiguate — use xterm for press,
-    // but need CSI u for release/repeat
-    if (event.event_type != .press) {
-        return encodeKittyCSIu(event, enc_state, out);
+    // event_types without disambiguate: presses keep plain xterm encoding;
+    // non-press functional keys use the parameterized legacy form (what
+    // kitty itself emits — CSI-u functional codepoints are reserved for
+    // modes the app opted into); non-press CSI-u keys use CSI u.
+    if (ev.event_type != .press) {
+        switch (ev.key) {
+            .up, .down, .left, .right => {
+                return encodeArrow(ev.key, ev.mods, enc_state.cursor_keys_app, ev.event_type, out);
+            },
+            .home, .end => return encodeHomeEnd(ev.key, ev.mods, ev.event_type, out),
+            .f1, .f2, .f3, .f4 => return encodeFKey1to4(ev.key, ev.mods, ev.event_type, out),
+            .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 => return encodeFKey5to12(ev.key, ev.mods, ev.event_type, out),
+            .page_up, .page_down, .insert, .delete => return encodeTildeKey(ev.key, ev.mods, ev.event_type, out),
+            else => return encodeKittyCSIu(ev, enc_state, out),
+        }
     }
-    return encodeXterm(event, enc_state, out);
+    return encodeXterm(ev, enc_state, out);
 }
 
 fn encodeKittyCSIu(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const u8 {
@@ -501,7 +551,8 @@ fn bufPrint(out: *[128]u8, comptime fmt: []const u8, args: anytype) []const u8 {
     return result;
 }
 
-// Tests are in key_encode_test.zig
+// Tests are in key_encode_test.zig and key_encode_kitty_event_test.zig
 test {
     _ = @import("key_encode_test.zig");
+    _ = @import("key_encode_kitty_event_test.zig");
 }
