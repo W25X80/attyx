@@ -6,6 +6,7 @@
 #import <Carbon/Carbon.h>
 #include <string.h>
 #include "macos_internal.h"
+#include "wheel_ticks.h"
 #include "macos_input_private.h"
 
 // ---------------------------------------------------------------------------
@@ -1051,44 +1052,44 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    double dy = (double)event.scrollingDeltaY;
+    int precise = event.hasPreciseScrollingDeltas ? 1 : 0;
+    double cellH = (double)g_cell_pt_h;
+
     if (g_popup_active) {
         if (g_popup_mouse_tracking && g_popup_mouse_sgr) {
-            CGFloat dy = event.scrollingDeltaY;
-            if (event.hasPreciseScrollingDeltas) dy /= 3.0;
-            if (dy == 0) return;
+            double accum = (double)_popupScrollAccum;
+            int ticks = attyx_wheel_ticks(&accum, dy, precise, cellH);
+            _popupScrollAccum = (CGFloat)accum;
+            if (ticks == 0) return;
             int col, row;
             mouseCell0(event, self, &col, &row);
             int pc, pr;
             if (popupHitTest(col, row, &pc, &pr)) {
-                int btn = (dy > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
-                sendSgrMousePopup(btn, pc, pr, YES);
+                int btn = (ticks > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
+                int n = ticks > 0 ? ticks : -ticks;
+                for (int i = 0; i < n; i++) sendSgrMousePopup(btn, pc, pr, YES);
             }
         }
         return;
     }
     if (g_mouse_tracking && g_mouse_sgr) {
-        CGFloat dy = event.scrollingDeltaY;
-        if (event.hasPreciseScrollingDeltas) dy /= 3.0;
-        if (dy == 0) return;
+        double accum = (double)_sgrScrollAccum;
+        int ticks = attyx_wheel_ticks(&accum, dy, precise, cellH);
+        _sgrScrollAccum = (CGFloat)accum;
+        if (ticks == 0) return;
         int col, row;
         mouseCell(event, self, &col, &row);
-        int btn = (dy > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
-        sendSgrMouse(btn, col, row, YES);
+        int btn = (ticks > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
+        int n = ticks > 0 ? ticks : -ticks;
+        for (int i = 0; i < n; i++) sendSgrMouse(btn, col, row, YES);
         return;
     }
 
-    CGFloat dy = event.scrollingDeltaY;
-    int lines;
-    if (event.hasPreciseScrollingDeltas) {
-        _scrollAccum += dy;
-        CGFloat threshold = g_cell_pt_h > 0 ? g_cell_pt_h : 16.0;
-        lines = (int)(_scrollAccum / threshold);
-        if (lines == 0) return;
-        _scrollAccum -= lines * threshold;
-    } else {
-        lines = (int)dy;
-        if (lines == 0) lines = (dy > 0) ? 1 : -1;
-    }
+    double accum = (double)_scrollAccum;
+    int lines = attyx_wheel_ticks(&accum, dy, precise, cellH);
+    _scrollAccum = (CGFloat)accum;
+    if (lines == 0) return;
 
     // Alt screen (TUI apps without mouse tracking): translate scroll into
     // up/down arrow key sequences so apps like less/man/vim can scroll.

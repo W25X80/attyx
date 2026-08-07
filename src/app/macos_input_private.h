@@ -10,6 +10,8 @@
     BOOL _rightDown;
     BOOL _middleDown;
     CGFloat _scrollAccum;
+    CGFloat _sgrScrollAccum;
+    CGFloat _popupScrollAccum;
     BOOL _selecting;
     BOOL _splitDragging;
     BOOL _sidebarDragging;
