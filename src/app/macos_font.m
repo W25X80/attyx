@@ -144,29 +144,8 @@ GlyphCache createGlyphCache(id<MTLDevice> device, CGFloat scale) {
     float baseline_y = (float)descent + (gh - naturalH) / 2.0f;
     float x_offset = (gw - naturalW) / 2.0f;
 
-    int cols = 32;
-    int initRows = 32;
-    int atlasW = (int)(gw * cols);
-    int atlasH = (int)(gh * initRows);
-
-    MTLTextureDescriptor* desc =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-                                                           width:atlasW
-                                                          height:atlasH
-                                                       mipmapped:NO];
-    id<MTLTexture> tex = [device newTextureWithDescriptor:desc];
-
-    uint8_t* zeroes = (uint8_t*)calloc(atlasW * atlasH, 1);
-    [tex replaceRegion:MTLRegionMake2D(0, 0, atlasW, atlasH)
-           mipmapLevel:0
-             withBytes:zeroes
-           bytesPerRow:atlasW];
-    free(zeroes);
-
     GlyphCache gc;
     memset((void*)&gc, 0, sizeof(gc));
-    gc.texture       = tex;
-    gc.color_texture = nil; // Lazy — created on first color glyph
     gc.font       = (CTFontRef)CFRetain(font);
 
     // Derive bold/italic/bold-italic variants using symbolic traits.
@@ -190,18 +169,15 @@ GlyphCache createGlyphCache(id<MTLDevice> device, CGFloat scale) {
     gc.descent    = descent;
     gc.baseline_y = baseline_y;
     gc.x_offset   = x_offset;
-    gc.atlas_cols = cols;
-    gc.atlas_w    = atlasW;
-    gc.atlas_h    = atlasH;
-    gc.next_slot  = 0;
-    gc.max_slots  = cols * initRows;
     gc.device     = device;
 
-    for (int i = 0; i < GLYPH_CACHE_CAP; i++) gc.map[i].slot = -1;
+    glyphCacheInitStorage(&gc);
 
     for (uint32_t ch = 32; ch < 127; ch++) {
         glyphCacheRasterize(&gc, ch);
     }
+    gc.fallback_slot = glyphCacheLookup(&gc, '?');
+    if (gc.fallback_slot < 0) gc.fallback_slot = 0;
 
     CFRelease(font);
     return gc;

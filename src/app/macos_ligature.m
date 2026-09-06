@@ -149,12 +149,11 @@ const LigaResult* shapeLigatureRun(GlyphCache* gc, const uint32_t* cps, int coun
         pos += toGet;
     }
 
-    LigaResult* result = ligaCacheInsert(key);
-    result->count = (int8_t)count;
-    result->hasAlternates = hasAlternates;
-    memset(result->slots, 0xFF, sizeof(result->slots)); // -1
-
     if (!hasAlternates) {
+        LigaResult* result = ligaCacheInsert(key);
+        result->count = (int8_t)count;
+        result->hasAlternates = false;
+        memset(result->slots, 0xFF, sizeof(result->slots));
         CFRelease(line);
         return result;
     }
@@ -177,11 +176,22 @@ const LigaResult* shapeLigatureRun(GlyphCache* gc, const uint32_t* cps, int coun
     }
     CFRelease(line);
 
-    uint8_t* pixels = (uint8_t*)calloc(totalW * gh, 1);
+    size_t pixelBytes = 0;
+    if (!glyphAtlasPixelBytes(totalW, gh, 1, &pixelBytes)) return NULL;
+
+    uint8_t* pixels = calloc(pixelBytes, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
-    CGContextRef ctx = CGBitmapContextCreate(pixels, totalW, gh, 8, totalW,
-                                             cs, kCGImageAlphaNone);
-    CGColorSpaceRelease(cs);
+    CGContextRef ctx = NULL;
+    if (pixels && cs) {
+        ctx = CGBitmapContextCreate(pixels, totalW, gh, 8, totalW,
+                                    cs, kCGImageAlphaNone);
+    }
+    if (cs) CGColorSpaceRelease(cs);
+    if (!pixels || !ctx) {
+        if (ctx) CGContextRelease(ctx);
+        free(pixels);
+        return NULL;
+    }
     CGContextSetGrayFillColor(ctx, 1.0, 1.0);
     CGContextSetShouldSmoothFonts(ctx, NO);
     CGContextSetAllowsFontSmoothing(ctx, NO);
@@ -196,29 +206,29 @@ const LigaResult* shapeLigatureRun(GlyphCache* gc, const uint32_t* cps, int coun
     CTFontDrawGlyphs(font, shapedGlyphs, drawPositions, shapedCount, ctx);
     CGContextRelease(ctx);
 
-    // Slice into per-cell atlas slots
+    if (!glyphCacheReserveSlots(gc, count)) {
+        free(pixels);
+        return NULL;
+    }
+
+    LigaResult* result = ligaCacheInsert(key);
+    result->count = (int8_t)count;
+    result->hasAlternates = true;
+    memset(result->slots, 0xFF, sizeof(result->slots));
+
     for (int k = 0; k < count; k++) {
-        if (gc->next_slot >= gc->max_slots) glyphCacheGrow(gc);
-        int slot = gc->next_slot++;
+        int slot = gc->next_slot + k;
         int ac = slot % gc->atlas_cols;
         int ar = slot / gc->atlas_cols;
 
-        // Extract cell k's column from the wide bitmap
-        uint8_t* cell_pixels = (uint8_t*)calloc(gw * gh, 1);
-        for (int row = 0; row < gh; row++) {
-            memcpy(&cell_pixels[row * gw],
-                   &pixels[row * totalW + k * gw],
-                   gw);
-        }
-
         [gc->texture replaceRegion:MTLRegionMake2D(ac * gw, ar * gh, gw, gh)
                        mipmapLevel:0
-                         withBytes:cell_pixels
-                       bytesPerRow:gw];
-        free(cell_pixels);
+                         withBytes:pixels + k * gw
+                       bytesPerRow:totalW];
         result->slots[k] = slot;
     }
 
+    gc->next_slot += count;
     free(pixels);
     return result;
 }

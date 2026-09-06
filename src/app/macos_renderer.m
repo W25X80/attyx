@@ -37,19 +37,25 @@ int emitRect(Vertex* v, int i, float x, float y, float w, float h,
 
 int emitGlyph(Vertex* v, int i, GlyphCache* gc, uint32_t cp,
               float x, float y, float gw, float gh,
-              float r, float g, float b) {
-    int slot = glyphCacheLookup(gc, cp);
-    if (slot < 0) slot = glyphCacheRasterize(gc, cp);
-    float aW = (float)gc->atlas_w, aH = (float)gc->atlas_h;
+              float r, float g, float b, bool* color) {
+    if (color) *color = false;
+    int encoded = glyphCacheLookup(gc, cp);
+    if (encoded < 0) encoded = glyphCacheRasterize(gc, cp);
+    GlyphAtlasSlot slot;
+    if (!glyphAtlasDecodeSlot(encoded, &slot)) return i;
+    if (color) *color = slot.color;
     float gW = gc->glyph_w, gH = gc->glyph_h;
-    int ac = slot % gc->atlas_cols, ar = slot / gc->atlas_cols;
-    float u0 = ac * gW / aW, u1 = (ac+1) * gW / aW;
-    float v0 = ar * gH / aH, v1 = (ar+1) * gH / aH;
+    GlyphAtlasTexelRect rect = glyphAtlasTexelRect(
+        slot.index, gc->atlas_cols, (int)gW, (int)gH, slot.width);
+    float u0 = rect.x0, u1 = rect.x1;
+    float v0 = rect.y0, v1 = rect.y1;
+    float drawW = gw * slot.width;
+    if (slot.color) r = g = b = 1.0f;
     v[i+0] = (Vertex){ x,    y,    u0,v0, r,g,b,1 };
-    v[i+1] = (Vertex){ x+gw, y,    u1,v0, r,g,b,1 };
+    v[i+1] = (Vertex){ x+drawW, y,    u1,v0, r,g,b,1 };
     v[i+2] = (Vertex){ x,    y+gh, u0,v1, r,g,b,1 };
-    v[i+3] = (Vertex){ x+gw, y,    u1,v0, r,g,b,1 };
-    v[i+4] = (Vertex){ x+gw, y+gh, u1,v1, r,g,b,1 };
+    v[i+3] = (Vertex){ x+drawW, y,    u1,v0, r,g,b,1 };
+    v[i+4] = (Vertex){ x+drawW, y+gh, u1,v1, r,g,b,1 };
     v[i+5] = (Vertex){ x,    y+gh, u0,v1, r,g,b,1 };
     return i + 6;
 }
@@ -60,7 +66,7 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
     for (int c = 0; c < len; c++) {
         uint32_t cp = (uint8_t)str[c];
         if (cp <= 32) continue;
-        i = emitGlyph(v, i, gc, cp, x + c * gw, y, gw, gh, r, g, b);
+        i = emitGlyph(v, i, gc, cp, x + c * gw, y, gw, gh, r, g, b, NULL);
     }
     return i;
 }
@@ -185,6 +191,7 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
 }
 
 - (void)dealloc {
+    destroyGlyphCache(&_glyphCache);
     free(_bgVerts);
     free(_textVerts);
     free(_colorVerts);
@@ -211,12 +218,7 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
 }
 
 - (void)rebuildFont:(MTKView*)view reason:(int)reason {
-    // Release old Core Text font. Metal textures are ARC-managed (released
-    // automatically when _glyphCache struct fields are overwritten below).
-    if (_glyphCache.font) CFRelease(_glyphCache.font);
-    if (_glyphCache.font_bold) CFRelease(_glyphCache.font_bold);
-    if (_glyphCache.font_italic) CFRelease(_glyphCache.font_italic);
-    if (_glyphCache.font_bold_italic) CFRelease(_glyphCache.font_bold_italic);
+    destroyGlyphCache(&_glyphCache);
 
     CGFloat scale = liveScale(view);
     _glyphCache = createGlyphCache(_device, scale);
