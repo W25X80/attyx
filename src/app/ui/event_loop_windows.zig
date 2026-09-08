@@ -983,7 +983,7 @@ fn doReloadConfig(ctx: *WinCtx) void {
         new_cfg.cell_height.encode() != c.g_cell_height;
     if (font_changed) {
         publish.publishFontConfig(&new_cfg);
-        ws.g_needs_font_rebuild = 1;
+        c.attyx_request_font_rebuild();
     }
 
     // Theme

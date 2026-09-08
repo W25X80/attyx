@@ -6,7 +6,10 @@
 #import <MetalKit/MetalKit.h>
 #import <CoreText/CoreText.h>
 
+#include <stdatomic.h>
+
 #include "bridge.h"
+#include "resize_req.h"
 
 // ---------------------------------------------------------------------------
 // Shared state (written by Zig PTY thread, read by renderer on main thread)
@@ -53,9 +56,13 @@ extern volatile int g_detected_url_end_col;
 // Row-level dirty bitset
 extern volatile uint64_t g_dirty[4];
 
-// Pending resize
-extern volatile int g_pending_resize_rows;
-extern volatile int g_pending_resize_cols;
+// Pending resize request: [gen:32 | rows:16 | cols:16], 0 = empty.
+// Published by the main thread, drained by the PTY thread via
+// attyx_check_resize. See resize_req.h for the word layout.
+extern _Atomic uint64_t g_resize_req;
+// Bumped by rebuildFont after installing new glyph metrics; requests packed
+// with an older generation are stale and rejected by the consumer.
+extern _Atomic uint32_t g_metrics_gen;
 
 // Cell dimensions in points (set once at glyph cache creation)
 extern CGFloat g_cell_pt_w;
