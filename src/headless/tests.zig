@@ -17,4 +17,5 @@ test {
     _ = @import("tests/state_resize_extra.zig");
     _ = @import("tests/resize_rounding.zig");
     _ = @import("tests/resize_scale_coherence.zig");
+    _ = @import("../app/atomic_bridge_contract_test.zig");
 }

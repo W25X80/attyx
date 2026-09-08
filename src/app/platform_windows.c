@@ -585,7 +585,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_cell_px_h = g_cell_h_pts * newScale;
 
         // Trigger font rebuild at new DPI
-        g_needs_font_rebuild = 1;
+        attyx_request_font_rebuild();
 
         // Windows provides the suggested new window rect in lParam
         RECT* suggested = (RECT*)lParam;
@@ -1010,8 +1010,7 @@ void attyx_run(AttyxCell* cells, int cols, int rows) {
         if (g_should_quit) break;
 
         // Check font rebuild
-        if (g_needs_font_rebuild) {
-            g_needs_font_rebuild = 0;
+        if (attyx_take_font_rebuild_reason() != 0) {
             windows_font_cleanup(&g_gc);
             if (windows_font_init(&g_gc, g_d3d_device, g_content_scale)) {
                 ligatureCacheClear();

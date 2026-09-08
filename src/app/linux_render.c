@@ -79,7 +79,7 @@ void linux_renderer_cleanup(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Font rebuild (called from main loop when g_needs_font_rebuild is set)
+// Font rebuild (called from the main loop on a bridge request)
 // ---------------------------------------------------------------------------
 void linux_rebuild_font(void) {
     // Capture ft_lib before overwriting g_gc.

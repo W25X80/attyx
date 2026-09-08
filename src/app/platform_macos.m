@@ -108,17 +108,6 @@ volatile uint64_t g_dirty[4] = {0,0,0,0};
 _Atomic uint64_t g_resize_req  = 0;
 _Atomic uint32_t g_metrics_gen = 0;
 
-// Arm a scale-reason rebuild unless a rebuild is already pending. CAS from
-// 0 so a concurrent FONT store (value 1, PTY thread on config reload)
-// always wins: FONT is the stronger reason — it also rasterizes at the
-// live scale and additionally applies the user's size change.
-static void attyx_arm_scale_rebuild(void) {
-    int expected = 0;
-    __atomic_compare_exchange_n(&g_needs_font_rebuild, &expected,
-                                ATTYX_REBUILD_SCALE, false,
-                                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-}
-
 // Set by a notification click (main thread) to the agent pane's ipc_id; the
 // event loop polls attyx_check_focus_request() and switches to its tab.
 volatile uint32_t g_pending_focus_ipc_id = 0;
@@ -226,15 +215,15 @@ int attyx_check_resize(int* out_rows, int* out_cols) {
     // fresh requests are never misjudged stale.
     uint64_t word = atomic_load_explicit(&g_resize_req, memory_order_acquire);
     if (word == 0) return 0;
+    // Return only a request this consumer actually claimed. If a newer word
+    // replaced it after the load, leave that word pending for the next poll.
+    if (!attyx_resize_try_claim(&g_resize_req, &word)) return 0;
     uint32_t gen;
     int pr, pc;
     attyx_resize_unpack(word, &gen, &pr, &pc);
     uint32_t cur_gen = atomic_load_explicit(&g_metrics_gen, memory_order_acquire);
     int stale = (gen != cur_gen) || pr <= 0 || pc <= 0;
     int noop  = (pr == g_rows && pc == g_cols);
-    // Drain exactly the loaded word; if a newer word already replaced it,
-    // the CAS fails and the newer request survives for the next poll.
-    atomic_compare_exchange_strong(&g_resize_req, &word, 0);
     if (stale || noop) return 0;
     *out_rows = pr;
     *out_cols = pc;
@@ -649,7 +638,7 @@ void attyx_spawn_new_window(void) {
 - (void)windowDidChangeScreen:(NSNotification*)notification {
     (void)notification;
     [self fitWindowToCurrentScreen];
-    attyx_arm_scale_rebuild();
+    attyx_request_scale_rebuild();
 }
 
 - (void)windowDidChangeBackingProperties:(NSNotification*)notification {
@@ -658,7 +647,7 @@ void attyx_spawn_new_window(void) {
     // when it observes a layer-scale delta, which some AppKit builds pre-sync
     // away. This unconditional window-level arm must not be removed as
     // "redundant".
-    attyx_arm_scale_rebuild();
+    attyx_request_scale_rebuild();
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {

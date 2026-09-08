@@ -129,7 +129,6 @@ pub export var g_needs_reload_config: i32 = 0;
 pub export var g_kitty_kbd_flags: i32 = 0;
 // macOS Option-as-Alt mode: 0=none (compose), 1=both, 2=left, 3=right
 pub export var g_macos_option_as_alt: i32 = 1;
-pub export var g_needs_font_rebuild: i32 = 0;
 pub export var g_needs_window_update: i32 = 0;
 pub export var g_background_opacity: f32 = 1.0;
 pub export var g_background_blur: i32 = 30;

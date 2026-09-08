@@ -652,8 +652,7 @@ void attyx_run(AttyxCell* cells, int cols, int rows) {
 
         glfwWaitEventsTimeout(wait);
 
-        if (g_needs_font_rebuild) {
-            g_needs_font_rebuild = 0;
+        if (attyx_take_font_rebuild_reason() != 0) {
             linux_rebuild_font();
         }
         if (g_needs_window_update) {

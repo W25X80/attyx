@@ -11,13 +11,8 @@
 #ifndef ATTYX_RESIZE_REQ_H
 #define ATTYX_RESIZE_REQ_H
 
+#include <stdatomic.h>
 #include <stdint.h>
-
-// g_needs_font_rebuild reason codes. Zig writers (ui/dispatch.zig,
-// ui/actions.zig) write 1 on font/config changes; 2 is set only inside the
-// macOS platform layer on display-scale changes.
-#define ATTYX_REBUILD_FONT  1
-#define ATTYX_REBUILD_SCALE 2
 
 static inline uint64_t attyx_resize_pack(uint32_t gen, int rows, int cols) {
     return ((uint64_t)gen << 32)
@@ -30,6 +25,12 @@ static inline void attyx_resize_unpack(uint64_t word, uint32_t* gen,
     *gen  = (uint32_t)(word >> 32);
     *rows = (int)((word >> 16) & 0xFFFFu);
     *cols = (int)(word & 0xFFFFu);
+}
+
+static inline int attyx_resize_try_claim(_Atomic uint64_t* slot,
+                                         uint64_t* expected) {
+    return atomic_compare_exchange_strong_explicit(
+        slot, expected, 0, memory_order_acquire, memory_order_relaxed);
 }
 
 // Cells that fit in `px` pixels after subtracting padding. The 0.001f

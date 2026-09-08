@@ -192,7 +192,7 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
 }
 
 - (void)drawInMTKView:(MTKView*)view {
-    int rebuild_reason = __atomic_exchange_n(&g_needs_font_rebuild, 0, __ATOMIC_RELAXED);
+    int rebuild_reason = attyx_take_font_rebuild_reason();
     if (rebuild_reason) {
         [self rebuildFont:view reason:rebuild_reason];
     }
@@ -279,10 +279,7 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
     // glyph metrics rasterized for another. The rebuild path republishes the
     // grid once metrics match (rebuildFont:reason:).
     if (fabs((double)liveScale(view) - (double)_glyphCache.scale) > 0.001) {
-        int expected = 0;
-        __atomic_compare_exchange_n(&g_needs_font_rebuild, &expected,
-                                    ATTYX_REBUILD_SCALE, false,
-                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        attyx_request_scale_rebuild();
         _fullRedrawNeeded = YES;
         return;
     }

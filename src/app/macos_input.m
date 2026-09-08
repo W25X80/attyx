@@ -348,10 +348,7 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
     if (!w) return;
     self.layer.contentsScale = w.backingScaleFactor;
     if (fabs((double)before - (double)w.backingScaleFactor) > 0.001) {
-        int expected = 0;
-        __atomic_compare_exchange_n(&g_needs_font_rebuild, &expected,
-                                    ATTYX_REBUILD_SCALE, false,
-                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        attyx_request_scale_rebuild();
     }
 }
 

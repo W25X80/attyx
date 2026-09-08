@@ -1381,7 +1381,7 @@ static void contentScaleCallback(GLFWwindow* w, float xscale, float yscale) {
 
     if (fabsf(actual - g_content_scale) > 0.01f) {
         g_content_scale = actual;
-        g_needs_font_rebuild = 1;
+        attyx_request_font_rebuild();
     }
 }
 
