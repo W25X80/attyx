@@ -1241,8 +1241,10 @@ pub fn ptyReaderThread(ctx: *PtyThreadCtx) void {
                 ps.publishCells(&ctx.active_theme, pcfg);
                 ps.publishImagePlacements(pcfg);
                 // Publish popup mouse mode so input handlers can route mouse events
-                c.g_popup_mouse_tracking = @intFromEnum(ps.pane.engine.state.mouse_tracking);
-                c.g_popup_mouse_sgr = @intFromBool(ps.pane.engine.state.mouse_sgr);
+                c.attyx_set_popup_mouse_mode(
+                    @intFromEnum(ps.pane.engine.state.mouse_tracking),
+                    @intFromBool(ps.pane.engine.state.mouse_sgr),
+                );
             }
         }
 

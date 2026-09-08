@@ -7,6 +7,7 @@
 #include <string.h>
 #include <math.h>
 #include "macos_internal.h"
+#include "wheel_ticks.h"
 #include "macos_input_private.h"
 
 // ---------------------------------------------------------------------------
@@ -1070,44 +1071,57 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    double dy = (double)event.scrollingDeltaY;
+    int precise = event.hasPreciseScrollingDeltas ? 1 : 0;
+    double cellH = (double)g_cell_pt_h;
+
     if (g_popup_active) {
-        if (g_popup_mouse_tracking && g_popup_mouse_sgr) {
-            CGFloat dy = event.scrollingDeltaY;
-            if (event.hasPreciseScrollingDeltas) dy /= 3.0;
-            if (dy == 0) return;
+        uint64_t popupModeSnapshot =
+            __atomic_load_n(&g_popup_mouse_mode_snapshot, __ATOMIC_ACQUIRE);
+        int popupMouseTracking =
+            attyx_mouse_mode_snapshot_tracking(popupModeSnapshot);
+        int popupMouseSgr = attyx_mouse_mode_snapshot_sgr(popupModeSnapshot);
+        if (popupMouseTracking && popupMouseSgr) {
             int col, row;
             mouseCell0(event, self, &col, &row);
             int pc, pr;
-            if (popupHitTest(col, row, &pc, &pr)) {
-                int btn = (dy > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
-                sendSgrMousePopup(btn, pc, pr, YES);
-            }
+            int routed = popupHitTest(col, row, &pc, &pr);
+            int ticks = attyx_wheel_ticks_routed(
+                &_popupScrollState, dy, precise, cellH,
+                attyx_input_route_id(1), popupModeSnapshot, routed);
+            if (ticks == 0) return;
+            int btn = (ticks > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
+            int n = ticks > 0 ? ticks : -ticks;
+            for (int i = 0; i < n; i++) sendSgrMousePopup(btn, pc, pr, YES);
         }
         return;
     }
-    if (g_mouse_tracking && g_mouse_sgr) {
-        CGFloat dy = event.scrollingDeltaY;
-        if (event.hasPreciseScrollingDeltas) dy /= 3.0;
-        if (dy == 0) return;
+    uint64_t modeSnapshot =
+        __atomic_load_n(&g_mouse_mode_snapshot, __ATOMIC_ACQUIRE);
+    int mouseTracking = attyx_mouse_mode_snapshot_tracking(modeSnapshot);
+    int mouseSgr = attyx_mouse_mode_snapshot_sgr(modeSnapshot);
+    if (mouseTracking && mouseSgr) {
+        int ticks = attyx_wheel_ticks_routed(
+            &_sgrScrollState, dy, precise, cellH,
+            attyx_input_route_id(0), modeSnapshot, 1);
+        if (ticks == 0) return;
         int col, row;
         mouseCell(event, self, &col, &row);
-        int btn = (dy > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
-        sendSgrMouse(btn, col, row, YES);
+        int btn = (ticks > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
+        int n = ticks > 0 ? ticks : -ticks;
+        for (int i = 0; i < n; i++) sendSgrMouse(btn, col, row, YES);
         return;
     }
 
-    CGFloat dy = event.scrollingDeltaY;
-    int lines;
-    if (event.hasPreciseScrollingDeltas) {
-        _scrollAccum += dy;
-        CGFloat threshold = g_cell_pt_h > 0 ? g_cell_pt_h : 16.0;
-        lines = (int)(_scrollAccum / threshold);
-        if (lines == 0) return;
-        _scrollAccum -= lines * threshold;
-    } else {
-        lines = (int)dy;
-        if (lines == 0) lines = (dy > 0) ? 1 : -1;
-    }
+    int gcol, grow;
+    mouseCell0(event, self, &gcol, &grow);
+    uint64_t routeContext = g_alt_screen
+        ? UINT64_MAX
+        : ((uint64_t)(uint32_t)gcol << 32) | (uint32_t)grow;
+    int lines = attyx_wheel_ticks_routed(
+        &_scrollState, dy, precise, cellH,
+        attyx_input_route_id(0), routeContext, 1);
+    if (lines == 0) return;
 
     // Alt screen (TUI apps without mouse tracking): translate scroll into
     // up/down arrow key sequences so apps like less/man/vim can scroll.
@@ -1120,8 +1134,6 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
     }
 
     // Overlay scroll: check before viewport scrollback
-    int gcol, grow;
-    mouseCell0(event, self, &gcol, &grow);
     if (g_overlay_has_actions) {
         if (attyx_overlay_scroll(gcol, grow, lines)) return;
         // Not on overlay — fall through to viewport scroll

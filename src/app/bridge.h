@@ -59,6 +59,10 @@ int attyx_should_quit(void);
 // Implemented in Zig (terminal.zig).
 void attyx_send_input(const uint8_t* bytes, int len);
 
+// Stable identity of the current input recipient. Used by platform-side
+// gesture state so a fractional wheel delta cannot cross pane boundaries.
+uint64_t attyx_input_route_id(int popup);
+
 // Clear screen and scrollback (Cmd+K / Ctrl+Shift+K).
 // Signals the PTY thread to clear the engine state directly and send
 // a form feed to the shell for prompt redraw.
@@ -91,6 +95,7 @@ void attyx_set_mode_flags(int bracketed_paste, int cursor_keys_app);
 // tracking: 0=off, 1=x10, 2=button_event, 3=any_event
 // sgr: 1 if SGR 1006 encoding is enabled
 void attyx_set_mouse_mode(int tracking, int sgr);
+void attyx_set_popup_mouse_mode(int tracking, int sgr);
 
 // Mark rows dirty (atomic OR). Called from PTY thread; renderer reads + clears.
 // dirty is a 4-element uint64_t array (256-row bitset).

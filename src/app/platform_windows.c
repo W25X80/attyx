@@ -243,6 +243,11 @@ void attyx_set_mouse_mode(int tracking, int sgr) {
     g_mouse_sgr = sgr;
 }
 
+void attyx_set_popup_mouse_mode(int tracking, int sgr) {
+    g_popup_mouse_tracking = tracking;
+    g_popup_mouse_sgr = sgr;
+}
+
 void attyx_mark_all_dirty(void) {
     for (int i = 0; i < 4; i++)
         InterlockedOr64((volatile LONG64*)&g_dirty[i], ~(uint64_t)0);

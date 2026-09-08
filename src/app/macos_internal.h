@@ -31,6 +31,8 @@ extern volatile int g_cursor_keys_app;
 // Mouse mode flags
 extern volatile int g_mouse_tracking;
 extern volatile int g_mouse_sgr;
+extern uint64_t g_mouse_mode_snapshot;
+extern uint64_t g_popup_mouse_mode_snapshot;
 
 // Kitty keyboard protocol flags
 extern volatile int g_kitty_kbd_flags;

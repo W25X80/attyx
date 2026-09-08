@@ -13,6 +13,7 @@
 
 #include "bridge.h"
 #include "macos_internal.h"
+#include "wheel_ticks.h"
 
 // Auto-updater (macos_updater.m)
 extern void attyx_updater_init(void);
@@ -37,6 +38,8 @@ volatile int g_cursor_keys_app = 0;
 
 volatile int g_mouse_tracking = 0;
 volatile int g_mouse_sgr = 0;
+uint64_t g_mouse_mode_snapshot = UINT64_C(1) << 32;
+uint64_t g_popup_mouse_mode_snapshot = UINT64_C(1) << 32;
 
 volatile int g_viewport_offset = 0;
 volatile int g_scrollback_count = 0;
@@ -155,8 +158,32 @@ void attyx_set_mode_flags(int bracketed_paste, int cursor_keys_app) {
 }
 
 void attyx_set_mouse_mode(int tracking, int sgr) {
+    uint64_t previous = __atomic_load_n(&g_mouse_mode_snapshot, __ATOMIC_ACQUIRE);
+    uint32_t generation = attyx_mouse_mode_snapshot_generation(previous);
+    int changed = attyx_mouse_mode_snapshot_tracking(previous) != tracking
+        || attyx_mouse_mode_snapshot_sgr(previous) != (sgr != 0);
     g_mouse_tracking = tracking;
     g_mouse_sgr = sgr;
+    if (changed) generation += 1;
+    __atomic_store_n(
+        &g_mouse_mode_snapshot,
+        attyx_mouse_mode_snapshot_pack(generation, tracking, sgr),
+        __ATOMIC_RELEASE);
+}
+
+void attyx_set_popup_mouse_mode(int tracking, int sgr) {
+    uint64_t previous =
+        __atomic_load_n(&g_popup_mouse_mode_snapshot, __ATOMIC_ACQUIRE);
+    uint32_t generation = attyx_mouse_mode_snapshot_generation(previous);
+    int changed = attyx_mouse_mode_snapshot_tracking(previous) != tracking
+        || attyx_mouse_mode_snapshot_sgr(previous) != (sgr != 0);
+    g_popup_mouse_tracking = tracking;
+    g_popup_mouse_sgr = sgr;
+    if (changed) generation += 1;
+    __atomic_store_n(
+        &g_popup_mouse_mode_snapshot,
+        attyx_mouse_mode_snapshot_pack(generation, tracking, sgr),
+        __ATOMIC_RELEASE);
 }
 
 void attyx_mark_all_dirty(void) {
