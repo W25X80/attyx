@@ -16,11 +16,12 @@ export fn attyx_send_input(_: [*]const u8, _: c_int) void {}
 export fn attyx_input_route_id(_: c_int) u64 { return 0; }
 export fn attyx_clear_screen() void {}
 export fn attyx_handle_key(_: u16, _: u8, _: u8, _: u32) void {}
+export fn attyx_handle_key_ext(_: u16, _: u8, _: u8, _: u32, _: u32, _: u32, _: ?[*]const u8, _: c_int) void {}
+export fn attyx_popup_handle_key_ext(_: u16, _: u8, _: u8, _: u32, _: u32, _: u32, _: ?[*]const u8, _: c_int) void {}
 export fn attyx_get_link_uri(_: u32, _: [*]u8, _: c_int) c_int { return 0; }
 export var g_needs_reload_config: i32 = 0;
 export var g_kitty_kbd_flags: i32 = 0;
 export var g_macos_option_as_alt: i32 = 1;
-export var g_needs_font_rebuild: i32 = 0;
 export var g_needs_window_update: i32 = 0;
 export fn attyx_trigger_config_reload() void {}
 export fn attyx_cleanup() void {}

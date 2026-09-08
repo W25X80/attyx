@@ -21,10 +21,22 @@ enum {
     KC_KP_DECIMAL, KC_KP_DIVIDE, KC_KP_MULTIPLY,
     KC_KP_MINUS, KC_KP_PLUS, KC_KP_ENTER, KC_KP_EQUAL,
     KC_CODEPOINT,
+    KC_LEFT_SHIFT, KC_LEFT_CONTROL, KC_LEFT_ALT, KC_LEFT_SUPER,
+    KC_RIGHT_SHIFT, KC_RIGHT_CONTROL, KC_RIGHT_ALT, KC_RIGHT_SUPER,
 };
 
 // Suppress WM_CHAR after handled WM_KEYDOWN
 int g_suppress_char = 0;
+static int g_altgr_control_suppressed = 0;
+
+typedef struct {
+    uint32_t codepoint;
+    uint32_t shifted_codepoint;
+    uint32_t base_codepoint;
+    uint8_t text[32];
+    int text_len;
+    int char_messages;
+} WinPrintableIdentity;
 
 // ---------------------------------------------------------------------------
 // VK_* -> KeyCode mapping
@@ -79,6 +91,27 @@ uint16_t win_mapVirtualKey(WPARAM vk, LPARAM lParam) {
     }
 }
 
+static uint16_t winMapAllKeyVirtualKey(WPARAM vk, LPARAM lParam) {
+    if (!(lParam & (1L << 24))) {
+        UINT scan_code = (((UINT_PTR)lParam >> 16) & 0xFF);
+        switch (vk) {
+            case VK_INSERT: if (scan_code == 0x52) return KC_KP_0; break;
+            case VK_END:    if (scan_code == 0x4F) return KC_KP_1; break;
+            case VK_DOWN:   if (scan_code == 0x50) return KC_KP_2; break;
+            case VK_NEXT:   if (scan_code == 0x51) return KC_KP_3; break;
+            case VK_LEFT:   if (scan_code == 0x4B) return KC_KP_4; break;
+            case VK_CLEAR:  if (scan_code == 0x4C) return KC_KP_5; break;
+            case VK_RIGHT:  if (scan_code == 0x4D) return KC_KP_6; break;
+            case VK_HOME:   if (scan_code == 0x47) return KC_KP_7; break;
+            case VK_UP:     if (scan_code == 0x48) return KC_KP_8; break;
+            case VK_PRIOR:  if (scan_code == 0x49) return KC_KP_9; break;
+            case VK_DELETE: if (scan_code == 0x53) return KC_KP_DECIMAL; break;
+            default: break;
+        }
+    }
+    return win_mapVirtualKey(vk, lParam);
+}
+
 // Detect AltGr: Windows sends left-Ctrl + right-Alt for AltGr.
 // Returns true when the "Ctrl" is just a phantom from AltGr.
 static int win_isAltGr(void) {
@@ -97,6 +130,233 @@ uint8_t win_buildMods(void) {
     // Strip phantom Ctrl from AltGr so alt+key bindings work with right-Alt
     if (win_isAltGr() && (m & 6) == 6) m &= ~4;
     return m;
+}
+
+static UINT winMessageScanCode(LPARAM lParam) {
+    UINT scan_code = ((UINT_PTR)lParam >> 16) & 0xFF;
+    if (lParam & (1L << 24)) scan_code |= 0xE000;
+    return scan_code;
+}
+
+static UINT winSideSpecificVirtualKey(WPARAM vk, LPARAM lParam) {
+    UINT normalized = (UINT)vk;
+    if (normalized == VK_SHIFT || normalized == VK_CONTROL || normalized == VK_MENU) {
+        UINT side_specific = MapVirtualKeyW(winMessageScanCode(lParam), MAPVK_VSC_TO_VK_EX);
+        if (side_specific != 0) normalized = side_specific;
+    }
+    return normalized;
+}
+
+static uint16_t win_mapModifierKey(WPARAM vk, LPARAM lParam) {
+    switch (winSideSpecificVirtualKey(vk, lParam)) {
+        case VK_LSHIFT:   return KC_LEFT_SHIFT;
+        case VK_LCONTROL: return KC_LEFT_CONTROL;
+        case VK_LMENU:    return KC_LEFT_ALT;
+        case VK_LWIN:     return KC_LEFT_SUPER;
+        case VK_RSHIFT:   return KC_RIGHT_SHIFT;
+        case VK_RCONTROL: return KC_RIGHT_CONTROL;
+        case VK_RMENU:    return KC_RIGHT_ALT;
+        case VK_RWIN:     return KC_RIGHT_SUPER;
+        default:          return UINT16_MAX;
+    }
+}
+
+static int winIsAltGrControlPrefix(WPARAM vk, LPARAM lParam) {
+    if (winSideSpecificVirtualKey(vk, lParam) != VK_LCONTROL) return 0;
+
+    MSG next;
+    if (!PeekMessageW(&next, NULL, WM_KEYFIRST, WM_KEYLAST, PM_NOREMOVE))
+        return 0;
+    return (next.message == WM_KEYDOWN || next.message == WM_SYSKEYDOWN) &&
+           (next.wParam == VK_MENU || next.wParam == VK_RMENU) &&
+           (next.lParam & (1L << 24)) != 0 &&
+           next.time == (DWORD)GetMessageTime();
+}
+
+static uint32_t winStandardCodepoint(LPARAM lParam, int shifted) {
+    static const char number_row[] = "1234567890";
+    static const char shifted_numbers[] = "!@#$%^&*()";
+    static const char top_row[] = "qwertyuiop";
+    static const char home_row[] = "asdfghjkl";
+    static const char bottom_row[] = "zxcvbnm";
+    UINT scan_code = (((UINT_PTR)lParam >> 16) & 0xFF);
+
+    if (scan_code >= 0x02 && scan_code <= 0x0B) {
+        size_t index = scan_code - 0x02;
+        return shifted ? (uint32_t)shifted_numbers[index]
+                       : (uint32_t)number_row[index];
+    }
+    if (scan_code >= 0x10 && scan_code <= 0x19) {
+        uint32_t codepoint = (uint32_t)top_row[scan_code - 0x10];
+        return shifted ? codepoint - 'a' + 'A' : codepoint;
+    }
+    if (scan_code >= 0x1E && scan_code <= 0x26) {
+        uint32_t codepoint = (uint32_t)home_row[scan_code - 0x1E];
+        return shifted ? codepoint - 'a' + 'A' : codepoint;
+    }
+    if (scan_code >= 0x2C && scan_code <= 0x32) {
+        uint32_t codepoint = (uint32_t)bottom_row[scan_code - 0x2C];
+        return shifted ? codepoint - 'a' + 'A' : codepoint;
+    }
+    switch (scan_code) {
+        case 0x0C: return shifted ? '_' : '-';
+        case 0x0D: return shifted ? '+' : '=';
+        case 0x1A: return shifted ? '{' : '[';
+        case 0x1B: return shifted ? '}' : ']';
+        case 0x27: return shifted ? ':' : ';';
+        case 0x28: return shifted ? '"' : '\'';
+        case 0x29: return shifted ? '~' : '`';
+        case 0x2B: return shifted ? '|' : '\\';
+        case 0x33: return shifted ? '<' : ',';
+        case 0x34: return shifted ? '>' : '.';
+        case 0x35: return shifted ? '?' : '/';
+        case 0x39: return ' ';
+        default:   return 0;
+    }
+}
+
+static uint32_t winFirstUtf16Scalar(const WCHAR* text, int length) {
+    if (length <= 0 || text[0] == 0) return 0;
+    uint32_t first = (uint16_t)text[0];
+    if (first >= 0xD800 && first <= 0xDBFF) {
+        if (length < 2) return 0;
+        uint32_t second = (uint16_t)text[1];
+        if (second < 0xDC00 || second > 0xDFFF) return 0;
+        return 0x10000u + ((first - 0xD800u) << 10) + (second - 0xDC00u);
+    }
+    if (first >= 0xDC00 && first <= 0xDFFF) return 0;
+    return first;
+}
+
+static int winUtf16TextIsPrintable(const WCHAR* text, int length) {
+    int offset = 0;
+    while (offset < length) {
+        uint32_t codepoint = winFirstUtf16Scalar(text + offset, length - offset);
+        if (codepoint == 0 || codepoint < 0x20 ||
+            (codepoint >= 0x7F && codepoint <= 0x9F))
+            return 0;
+        offset += codepoint > 0xFFFF ? 2 : 1;
+    }
+    return 1;
+}
+
+static int winTranslateVirtualKey(WPARAM vk, LPARAM lParam, const BYTE state[256],
+                                  WCHAR* output, int capacity, int* dead) {
+    UINT scan_code = (((UINT_PTR)lParam >> 16) & 0xFF);
+    int result = ToUnicodeEx((UINT)vk, scan_code, state, output, capacity, 4,
+                             GetKeyboardLayout(0));
+    *dead = result < 0;
+    return result < 0 ? -result : result;
+}
+
+static int buildWinPrintableIdentity(WPARAM vk, LPARAM lParam, int include_text,
+                                     WinPrintableIdentity* identity) {
+    memset(identity, 0, sizeof(*identity));
+
+    BYTE neutral_state[256] = {0};
+    WCHAR translated[8] = {0};
+    int dead = 0;
+    int translated_len = winTranslateVirtualKey(vk, lParam, neutral_state,
+                                                 translated, 8, &dead);
+    uint32_t codepoint = winFirstUtf16Scalar(translated, translated_len);
+    uint32_t base_codepoint = winStandardCodepoint(lParam, 0);
+    if (codepoint == 0) codepoint = base_codepoint;
+    if (codepoint == 0) return 0;
+    if (codepoint >= 'A' && codepoint <= 'Z')
+        codepoint = codepoint - 'A' + 'a';
+
+    BYTE shifted_state[256] = {0};
+    shifted_state[VK_SHIFT] = 0x80;
+    shifted_state[VK_LSHIFT] = 0x80;
+    memset(translated, 0, sizeof(translated));
+    translated_len = winTranslateVirtualKey(vk, lParam, shifted_state,
+                                             translated, 8, &dead);
+    uint32_t shifted_codepoint = winFirstUtf16Scalar(translated, translated_len);
+    if (shifted_codepoint == 0 && base_codepoint == codepoint)
+        shifted_codepoint = winStandardCodepoint(lParam, 1);
+    if (shifted_codepoint == codepoint) shifted_codepoint = 0;
+    if (base_codepoint == codepoint) base_codepoint = 0;
+
+    identity->codepoint = codepoint;
+    identity->shifted_codepoint = shifted_codepoint;
+    identity->base_codepoint = base_codepoint;
+
+    if (!include_text || g_ime_composing) return 1;
+    BYTE actual_state[256];
+    if (!GetKeyboardState(actual_state)) return 1;
+    memset(translated, 0, sizeof(translated));
+    translated_len = winTranslateVirtualKey(vk, lParam, actual_state,
+                                             translated, 8, &dead);
+    if (dead || translated_len <= 0) return 1;
+    if (translated_len > 8) translated_len = 8;
+    identity->char_messages = translated_len;
+    if (!winUtf16TextIsPrintable(translated, translated_len)) return 1;
+    identity->text_len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                              translated, translated_len,
+                                              (char*)identity->text,
+                                              (int)sizeof(identity->text),
+                                              NULL, NULL);
+    return 1;
+}
+
+static void dispatchWinKeyExt(uint16_t key, uint8_t mods, uint8_t event_type,
+                              uint32_t codepoint, uint32_t shifted_codepoint,
+                              uint32_t base_codepoint, const uint8_t* text,
+                              int text_len) {
+    if (g_popup_active) {
+        attyx_popup_handle_key_ext(key, mods, event_type, codepoint,
+                                   shifted_codepoint, base_codepoint,
+                                   text, text_len);
+    } else {
+        attyx_handle_key_ext(key, mods, event_type, codepoint,
+                            shifted_codepoint, base_codepoint,
+                            text, text_len);
+    }
+}
+
+static int routeWinAllKey(WPARAM vk, LPARAM lParam, uint8_t event_type) {
+    if (!(g_kitty_kbd_flags & 8)) return 0;
+
+    UINT side_specific = winSideSpecificVirtualKey(vk, lParam);
+    if (side_specific == VK_LCONTROL) {
+        if (event_type != 3 &&
+            (g_altgr_control_suppressed || winIsAltGrControlPrefix(vk, lParam))) {
+            g_altgr_control_suppressed = 1;
+            g_suppress_char = 0;
+            return 1;
+        }
+        if (event_type == 3 && g_altgr_control_suppressed) {
+            g_altgr_control_suppressed = 0;
+            g_suppress_char = 0;
+            return 1;
+        }
+    }
+
+    uint8_t mods = win_buildMods();
+    if (g_altgr_control_suppressed) mods &= ~4;
+    uint16_t mapped = winMapAllKeyVirtualKey(vk, lParam);
+    if (mapped != UINT16_MAX) {
+        dispatchWinKeyExt(mapped, mods, event_type, 0, 0, 0, NULL, 0);
+        g_suppress_char = event_type == 3 ? 0 : 1;
+        return 1;
+    }
+
+    uint16_t modifier = win_mapModifierKey(vk, lParam);
+    if (modifier != UINT16_MAX) {
+        dispatchWinKeyExt(modifier, mods, event_type, 0, 0, 0, NULL, 0);
+        g_suppress_char = 0;
+        return 1;
+    }
+
+    WinPrintableIdentity identity;
+    if (!buildWinPrintableIdentity(vk, lParam, event_type != 3, &identity))
+        return 0;
+    dispatchWinKeyExt(KC_CODEPOINT, mods, event_type, identity.codepoint,
+                      identity.shifted_codepoint, identity.base_codepoint,
+                      identity.text_len > 0 ? identity.text : NULL,
+                      identity.text_len);
+    g_suppress_char = event_type == 3 ? 0 : identity.char_messages;
+    return 1;
 }
 
 // Build key + codepoint for keybind matching from a virtual key.
@@ -279,6 +539,8 @@ static LRESULT handleKeyDown(HWND hwnd, WPARAM vk, LPARAM lParam) {
         return 0;
     }
 
+    if (routeWinAllKey(vk, lParam, isRepeat ? 2 : 1)) return 0;
+
     // Route to popup when active
     if (g_popup_active) {
         uint16_t mapped = win_mapVirtualKey(vk, lParam);
@@ -374,7 +636,14 @@ static LRESULT handleKeyDown(HWND hwnd, WPARAM vk, LPARAM lParam) {
 
 static LRESULT handleKeyUp(HWND hwnd, WPARAM vk, LPARAM lParam) {
     (void)hwnd;
-    if (!(g_kitty_kbd_flags & 2)) return 0;
+    if (!(g_kitty_kbd_flags & 2)) {
+        if (g_altgr_control_suppressed &&
+            winSideSpecificVirtualKey(vk, lParam) == VK_LCONTROL)
+            g_altgr_control_suppressed = 0;
+        return 0;
+    }
+
+    if (routeWinAllKey(vk, lParam, 3)) return 0;
 
     uint16_t mapped = win_mapVirtualKey(vk, lParam);
     uint8_t m = win_buildMods();
@@ -396,7 +665,7 @@ static LRESULT handleKeyUp(HWND hwnd, WPARAM vk, LPARAM lParam) {
 
 static LRESULT handleChar(HWND hwnd, WPARAM wParam) {
     (void)hwnd;
-    if (g_suppress_char) { g_suppress_char = 0; return 0; }
+    if (g_suppress_char > 0) { g_suppress_char--; return 0; }
     if (g_copy_mode) return 0;
 
     uint32_t codepoint = (uint32_t)wParam;
@@ -441,6 +710,7 @@ static LRESULT handleImeStartComposition(HWND hwnd) {
         ImmSetCompositionWindow(himc, &cf);
         ImmReleaseContext(hwnd, himc);
     }
+    g_suppress_char = 0;
     g_ime_composing = 1;
     g_ime_anchor_row = g_cursor_row;
     g_ime_anchor_col = g_cursor_col;
@@ -463,9 +733,15 @@ static LRESULT handleImeComposition(HWND hwnd, LPARAM lParam) {
                     char* utf8 = (char*)malloc(utf8_len);
                     if (utf8) {
                         WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, utf8_len, NULL, NULL);
-                        void (*send_fn)(const uint8_t*, int) =
-                            g_popup_active ? attyx_popup_send_input : attyx_send_input;
-                        send_fn((const uint8_t*)utf8, utf8_len - 1);
+                        if (g_kitty_kbd_flags & 8) {
+                            dispatchWinKeyExt(KC_CODEPOINT, 0, 1, 0, 0, 0,
+                                              (const uint8_t*)utf8,
+                                              utf8_len - 1);
+                        } else {
+                            void (*send_fn)(const uint8_t*, int) =
+                                g_popup_active ? attyx_popup_send_input : attyx_send_input;
+                            send_fn((const uint8_t*)utf8, utf8_len - 1);
+                        }
                         free(utf8);
                     }
                 }

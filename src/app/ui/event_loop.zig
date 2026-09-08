@@ -281,7 +281,7 @@ pub fn ptyReaderThread(ctx: *PtyThreadCtx) void {
     // mode (`pane.deferred != null` on the daemon). The shell hasn't
     // been forked yet — it will spawn at whatever dims we forward via
     // the first pane_resize. So we wait for the main thread's real
-    // window dims to land in `g_pending_resize`, send pane_resize once,
+    // window dims to land in the pending resize request, send pane_resize once,
     // and the shell's very first prompt renders at the actual width.
     //
     // No stale 80×24 snapshot, no SIGWINCH-redraw nudge — there's
@@ -290,7 +290,7 @@ pub fn ptyReaderThread(ctx: *PtyThreadCtx) void {
         const startup_pane = ctx.tab_mgr.activePane();
         if (startup_pane.daemon_pane_id != null) {
             logging.info("startup", "waiting for real window dims (session at {d}x{d})", .{ ctx.grid_cols, ctx.grid_rows });
-            // Wait up to 2s for `g_pending_resize` from the main thread.
+            // Wait up to 2s for the pending resize request from the main thread.
             // On timeout fall through with whatever dims we have so the
             // deferred pane still activates (worst case: config defaults).
             var dims_arrived = false;

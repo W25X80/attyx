@@ -2,6 +2,7 @@
 // Keyboard, mouse, clipboard, framebuffer-resize, and GLFW error callbacks.
 
 #include "linux_internal.h"
+#include "glfw_char_gate.h"
 
 // ---------------------------------------------------------------------------
 // Keyboard handling
@@ -20,9 +21,23 @@ enum {
     KC_KP_DECIMAL, KC_KP_DIVIDE, KC_KP_MULTIPLY,
     KC_KP_MINUS, KC_KP_PLUS, KC_KP_ENTER, KC_KP_EQUAL,
     KC_CODEPOINT,
+    KC_LEFT_SHIFT, KC_LEFT_CONTROL, KC_LEFT_ALT, KC_LEFT_SUPER,
+    KC_RIGHT_SHIFT, KC_RIGHT_CONTROL, KC_RIGHT_ALT, KC_RIGHT_SUPER,
 };
 
 static int g_suppress_char = 0;
+
+typedef struct {
+    int active;
+    int popup;
+    uint8_t mods;
+    uint8_t event_type;
+    uint32_t codepoint;
+    uint32_t shifted_codepoint;
+    uint32_t base_codepoint;
+} PendingGlfwKey;
+
+static PendingGlfwKey g_pending_glfw_key = {0};
 
 static void snapViewport(void) {
     // Don't snap/clear when in copy mode — selection is keyboard-driven
@@ -104,6 +119,175 @@ static uint8_t glfwActionToEventType(int action) {
     }
 }
 
+static uint16_t mapGlfwModifierKey(int key) {
+    switch (key) {
+        case GLFW_KEY_LEFT_SHIFT:    return KC_LEFT_SHIFT;
+        case GLFW_KEY_LEFT_CONTROL:  return KC_LEFT_CONTROL;
+        case GLFW_KEY_LEFT_ALT:      return KC_LEFT_ALT;
+        case GLFW_KEY_LEFT_SUPER:    return KC_LEFT_SUPER;
+        case GLFW_KEY_RIGHT_SHIFT:   return KC_RIGHT_SHIFT;
+        case GLFW_KEY_RIGHT_CONTROL: return KC_RIGHT_CONTROL;
+        case GLFW_KEY_RIGHT_ALT:     return KC_RIGHT_ALT;
+        case GLFW_KEY_RIGHT_SUPER:   return KC_RIGHT_SUPER;
+        default:                     return UINT16_MAX;
+    }
+}
+
+static uint32_t glfwStandardCodepoint(int key, int shifted) {
+    if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z)
+        return (shifted ? 'A' : 'a') + (uint32_t)(key - GLFW_KEY_A);
+    if (key >= GLFW_KEY_0 && key <= GLFW_KEY_9) {
+        static const char shifted_digits[] = ")!@#$%^&*(";
+        return shifted ? (uint32_t)shifted_digits[key - GLFW_KEY_0]
+                       : (uint32_t)('0' + key - GLFW_KEY_0);
+    }
+    switch (key) {
+        case GLFW_KEY_SPACE:         return ' ';
+        case GLFW_KEY_APOSTROPHE:    return shifted ? '"' : '\'';
+        case GLFW_KEY_COMMA:         return shifted ? '<' : ',';
+        case GLFW_KEY_MINUS:         return shifted ? '_' : '-';
+        case GLFW_KEY_PERIOD:        return shifted ? '>' : '.';
+        case GLFW_KEY_SLASH:         return shifted ? '?' : '/';
+        case GLFW_KEY_SEMICOLON:     return shifted ? ':' : ';';
+        case GLFW_KEY_EQUAL:         return shifted ? '+' : '=';
+        case GLFW_KEY_LEFT_BRACKET:  return shifted ? '{' : '[';
+        case GLFW_KEY_BACKSLASH:     return shifted ? '|' : '\\';
+        case GLFW_KEY_RIGHT_BRACKET: return shifted ? '}' : ']';
+        case GLFW_KEY_GRAVE_ACCENT:  return shifted ? '~' : '`';
+        default:                     return 0;
+    }
+}
+
+static uint32_t firstUtf8Codepoint(const char* text) {
+    if (!text || !text[0]) return 0;
+    const uint8_t* bytes = (const uint8_t*)text;
+    uint32_t codepoint;
+    int length;
+    if (bytes[0] < 0x80) {
+        return bytes[0];
+    } else if ((bytes[0] & 0xE0) == 0xC0) {
+        codepoint = bytes[0] & 0x1F;
+        length = 2;
+        if (codepoint < 2) return 0;
+    } else if ((bytes[0] & 0xF0) == 0xE0) {
+        codepoint = bytes[0] & 0x0F;
+        length = 3;
+    } else if ((bytes[0] & 0xF8) == 0xF0) {
+        codepoint = bytes[0] & 0x07;
+        length = 4;
+    } else {
+        return 0;
+    }
+    for (int i = 1; i < length; i++) {
+        if ((bytes[i] & 0xC0) != 0x80) return 0;
+        codepoint = (codepoint << 6) | (bytes[i] & 0x3F);
+    }
+    if ((length == 3 && codepoint < 0x800) ||
+        (length == 4 && codepoint < 0x10000) ||
+        codepoint > 0x10FFFF ||
+        (codepoint >= 0xD800 && codepoint <= 0xDFFF))
+        return 0;
+    return codepoint;
+}
+
+static int buildGlfwPrintableIdentity(int key, int scancode,
+                                      uint32_t* codepoint,
+                                      uint32_t* shifted_codepoint,
+                                      uint32_t* base_codepoint) {
+    uint32_t base = glfwStandardCodepoint(key, 0);
+    uint32_t current = firstUtf8Codepoint(glfwGetKeyName(key, scancode));
+    if (current == 0) current = base;
+    if (current == 0) return 0;
+
+    uint32_t shifted = 0;
+    if (current >= 'a' && current <= 'z') {
+        shifted = current - 'a' + 'A';
+    } else if (current >= 'A' && current <= 'Z') {
+        shifted = current;
+        current = current - 'A' + 'a';
+    } else if (current == base) {
+        shifted = glfwStandardCodepoint(key, 1);
+    }
+
+    if (shifted == current) shifted = 0;
+    if (base == current) base = 0;
+    *codepoint = current;
+    *shifted_codepoint = shifted;
+    *base_codepoint = base;
+    return 1;
+}
+
+static void dispatchGlfwKeyExt(int popup, uint16_t key, uint8_t mods,
+                               uint8_t event_type, uint32_t codepoint,
+                               uint32_t shifted_codepoint,
+                               uint32_t base_codepoint,
+                               const uint8_t* text, int text_len) {
+    if (popup) {
+        attyx_popup_handle_key_ext(key, mods, event_type, codepoint,
+                                   shifted_codepoint, base_codepoint,
+                                   text, text_len);
+    } else {
+        attyx_handle_key_ext(key, mods, event_type, codepoint,
+                            shifted_codepoint, base_codepoint,
+                            text, text_len);
+    }
+}
+
+static void flushPendingGlfwKey(void) {
+    if (!g_pending_glfw_key.active) return;
+    PendingGlfwKey pending = g_pending_glfw_key;
+    g_pending_glfw_key.active = 0;
+    dispatchGlfwKeyExt(pending.popup, KC_CODEPOINT, pending.mods,
+                       pending.event_type, pending.codepoint,
+                       pending.shifted_codepoint, pending.base_codepoint,
+                       NULL, 0);
+}
+
+static int routeGlfwAllKey(GLFWwindow* window, int key, int scancode,
+                           int action, int mods) {
+    if (!(g_kitty_kbd_flags & 8)) return 0;
+
+    uint8_t event_type = glfwActionToEventType(action);
+    uint8_t encoded_mods = buildGlfwMods(mods);
+    uint16_t mapped = mapGlfwKey(key);
+    if (mapped == UINT16_MAX) mapped = mapGlfwModifierKey(key);
+    if (mapped != UINT16_MAX) {
+        dispatchGlfwKeyExt(g_popup_active, mapped, encoded_mods, event_type,
+                           0, 0, 0, NULL, 0);
+        g_suppress_char = mapGlfwModifierKey(key) == UINT16_MAX;
+        return 1;
+    }
+
+    uint32_t codepoint;
+    uint32_t shifted_codepoint;
+    uint32_t base_codepoint;
+    if (!buildGlfwPrintableIdentity(key, scancode, &codepoint,
+                                    &shifted_codepoint, &base_codepoint))
+        return 0;
+
+    int text_may_follow = !(mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER));
+    if (glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS)
+        text_may_follow = 1;
+    if (action != GLFW_RELEASE && (g_kitty_kbd_flags & 16) && text_may_follow) {
+        g_pending_glfw_key = (PendingGlfwKey){
+            .active = 1,
+            .popup = g_popup_active,
+            .mods = encoded_mods,
+            .event_type = event_type,
+            .codepoint = codepoint,
+            .shifted_codepoint = shifted_codepoint,
+            .base_codepoint = base_codepoint,
+        };
+        g_suppress_char = 0;
+        return 1;
+    }
+
+    dispatchGlfwKeyExt(g_popup_active, KC_CODEPOINT, encoded_mods, event_type,
+                       codepoint, shifted_codepoint, base_codepoint, NULL, 0);
+    g_suppress_char = action != GLFW_RELEASE;
+    return 1;
+}
+
 // ---------------------------------------------------------------------------
 // Platform clipboard operations (called from Zig dispatch)
 // ---------------------------------------------------------------------------
@@ -168,15 +352,20 @@ static int remapNumpadIfNoNumlock(int key, int mods) {
 }
 
 static void keyCallback(GLFWwindow* w, int key, int scancode, int action, int mods) {
-    (void)w; (void)scancode;
+    flushPendingGlfwKey();
 
     // Remap numpad digit keys to navigation when NumLock is off
+    int physical_key = key;
     key = remapNumpadIfNoNumlock(key, mods);
-    if (key < 0) return; // KP_5 with no numlock has no function
+    if (key < 0) {
+        if (!(g_kitty_kbd_flags & 8)) return;
+        key = physical_key;
+    }
 
     // Handle key releases for kitty protocol
     if (action == GLFW_RELEASE) {
         if (g_kitty_kbd_flags & 2) {
+            if (routeGlfwAllKey(w, physical_key, scancode, action, mods)) return;
             uint16_t mapped = mapGlfwKey(key);
             uint8_t m = buildGlfwMods(mods);
             void (*key_fn)(uint16_t, uint8_t, uint8_t, uint32_t) =
@@ -191,7 +380,7 @@ static void keyCallback(GLFWwindow* w, int key, int scancode, int action, int mo
         return;
     }
 
-    g_suppress_char = 0;
+    attyx_glfw_begin_key(&g_suppress_char);
 
     // Context menu: Escape dismisses it (contextual, not configurable).
     if (g_ctx_menu_open && key == GLFW_KEY_ESCAPE) {
@@ -344,6 +533,8 @@ static void keyCallback(GLFWwindow* w, int key, int scancode, int action, int mo
         return;
     }
 
+    if (routeGlfwAllKey(w, physical_key, scancode, action, mods)) return;
+
     // When popup is active, route ALL input to popup
     if (g_popup_active && action != GLFW_RELEASE) {
         uint16_t mapped = mapGlfwKey(key);
@@ -409,7 +600,21 @@ static void keyCallback(GLFWwindow* w, int key, int scancode, int action, int mo
 
 static void charCallback(GLFWwindow* w, unsigned int codepoint) {
     (void)w;
-    if (g_suppress_char) { g_suppress_char = 0; return; }
+    if (g_pending_glfw_key.active) {
+        PendingGlfwKey pending = g_pending_glfw_key;
+        uint8_t text[4];
+        int text_len = utf8Encode(codepoint, text);
+        g_pending_glfw_key.active = 0;
+        if ((codepoint < 0x20) || (codepoint >= 0x7F && codepoint <= 0x9F))
+            text_len = 0;
+        dispatchGlfwKeyExt(pending.popup, KC_CODEPOINT, pending.mods,
+                           pending.event_type, pending.codepoint,
+                           pending.shifted_codepoint, pending.base_codepoint,
+                           text_len > 0 ? text : NULL, text_len);
+        attyx_glfw_begin_key(&g_suppress_char);
+        return;
+    }
+    if (attyx_glfw_take_suppressed_char(&g_suppress_char)) return;
     if (g_copy_mode) return;
 
     // When search bar is open, route chars to search overlay
@@ -428,6 +633,18 @@ static void charCallback(GLFWwindow* w, unsigned int codepoint) {
     if (g_session_picker_active || g_command_palette_active || g_theme_picker_active || g_tab_picker_active || g_agent_dashboard_active) {
         if (codepoint >= 0x20) attyx_picker_insert_char(codepoint);
         return;
+    }
+
+    if (g_kitty_kbd_flags & 8) {
+        uint8_t text[4];
+        int text_len = utf8Encode(codepoint, text);
+        if (text_len > 0 && codepoint >= 0x20 &&
+            !(codepoint >= 0x7F && codepoint <= 0x9F)) {
+            if (!g_popup_active) snapViewport();
+            dispatchGlfwKeyExt(g_popup_active, KC_CODEPOINT, 0, 1,
+                               0, 0, 0, text, text_len);
+            return;
+        }
     }
 
     // When popup is active, route chars to popup
@@ -1299,8 +1516,8 @@ static void framebufferSizeCallback(GLFWwindow* w, int width, int height) {
     if (g_cell_px_w <= 0 || g_cell_px_h <= 0) return;
     float padPxW = (float)(g_padding_left + g_padding_right) * g_content_scale;
     float padPxH = (float)(g_padding_top  + g_padding_bottom) * g_content_scale;
-    int new_cols = (int)((width  - padPxW) / g_cell_px_w + 0.01f);
-    int new_rows = (int)((height - padPxH) / g_cell_px_h + 0.01f);
+    int new_cols = (int)((width  - padPxW) / g_cell_px_w + 0.001f);
+    int new_rows = (int)((height - padPxH) / g_cell_px_h + 0.001f);
     if (new_cols < 1) new_cols = 1;
     if (new_rows < 1) new_rows = 1;
     if (new_cols > ATTYX_MAX_COLS) new_cols = ATTYX_MAX_COLS;
@@ -1381,7 +1598,7 @@ static void contentScaleCallback(GLFWwindow* w, float xscale, float yscale) {
 
     if (fabsf(actual - g_content_scale) > 0.01f) {
         g_content_scale = actual;
-        g_needs_font_rebuild = 1;
+        attyx_request_font_rebuild();
     }
 }
 

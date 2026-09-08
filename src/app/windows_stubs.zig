@@ -97,15 +97,45 @@ export fn attyx_clear_screen() void {
     @atomicStore(i32, &g_clear_screen_pending, 1, .seq_cst);
 }
 
+fn bridgeCodepoint(raw: u32) u21 {
+    if (raw > 0x10FFFF or (raw >= 0xD800 and raw <= 0xDFFF)) return 0;
+    return @intCast(raw);
+}
+
+fn bridgeText(bytes: ?[*]const u8, len: c_int) []const u8 {
+    if (bytes == null or len <= 0) return "";
+    return bytes.?[0..@intCast(len)];
+}
+
 export fn attyx_handle_key(k: u16, m: u8, e: u8, cp: u32) void {
+    attyx_handle_key_ext(k, m, e, cp, 0, 0, null, 0);
+}
+
+export fn attyx_handle_key_ext(
+    k: u16,
+    m: u8,
+    e: u8,
+    cp: u32,
+    shifted_cp: u32,
+    base_cp: u32,
+    text_ptr: ?[*]const u8,
+    text_len: c_int,
+) void {
     const eng = g_engine orelse return;
     const key: key_encode.KeyCode = std.meta.intToEnum(key_encode.KeyCode, k) catch return;
     const mods: key_encode.Modifiers = @bitCast(m);
     const event_type: key_encode.EventType = std.meta.intToEnum(key_encode.EventType, e) catch return;
-    const codepoint: u21 = if (cp <= 0x10FFFF) @intCast(cp) else 0;
     var buf: [128]u8 = undefined;
     const encoded = key_encode.encodeKey(
-        .{ .key = key, .mods = mods, .event_type = event_type, .codepoint = codepoint },
+        .{
+            .key = key,
+            .mods = mods,
+            .event_type = event_type,
+            .codepoint = bridgeCodepoint(cp),
+            .shifted_codepoint = bridgeCodepoint(shifted_cp),
+            .base_codepoint = bridgeCodepoint(base_cp),
+            .text = bridgeText(text_ptr, text_len),
+        },
         .{
             .cursor_keys_app = eng.state.cursor_keys_app,
             .keypad_app_mode = eng.state.keypad_app_mode,
@@ -460,6 +490,19 @@ export fn attyx_popup_send_input(bytes: [*]const u8, len: c_int) void {
 }
 
 export fn attyx_popup_handle_key(k: u16, m: u8, e: u8, cp: u32) void {
+    attyx_popup_handle_key_ext(k, m, e, cp, 0, 0, null, 0);
+}
+
+export fn attyx_popup_handle_key_ext(
+    k: u16,
+    m: u8,
+    e: u8,
+    cp: u32,
+    shifted_cp: u32,
+    base_cp: u32,
+    text_ptr: ?[*]const u8,
+    text_len: c_int,
+) void {
     if (@atomicLoad(i32, &popup_dead, .seq_cst) != 0) {
         const key: key_encode.KeyCode = std.meta.intToEnum(key_encode.KeyCode, k) catch return;
         const mods: key_encode.Modifiers = @bitCast(m);
@@ -472,10 +515,17 @@ export fn attyx_popup_handle_key(k: u16, m: u8, e: u8, cp: u32) void {
     const key: key_encode.KeyCode = std.meta.intToEnum(key_encode.KeyCode, k) catch return;
     const mods: key_encode.Modifiers = @bitCast(m);
     const event_type: key_encode.EventType = std.meta.intToEnum(key_encode.EventType, e) catch return;
-    const codepoint: u21 = if (cp <= 0x10FFFF) @intCast(cp) else 0;
     var buf: [128]u8 = undefined;
     const encoded = key_encode.encodeKey(
-        .{ .key = key, .mods = mods, .event_type = event_type, .codepoint = codepoint },
+        .{
+            .key = key,
+            .mods = mods,
+            .event_type = event_type,
+            .codepoint = bridgeCodepoint(cp),
+            .shifted_codepoint = bridgeCodepoint(shifted_cp),
+            .base_codepoint = bridgeCodepoint(base_cp),
+            .text = bridgeText(text_ptr, text_len),
+        },
         .{
             .cursor_keys_app = eng.state.cursor_keys_app,
             .keypad_app_mode = eng.state.keypad_app_mode,
@@ -502,7 +552,6 @@ comptime {
 
 pub export var g_needs_reload_config: i32 = 0;
 pub export var g_kitty_kbd_flags: i32 = 0;
-pub export var g_needs_font_rebuild: i32 = 0;
 pub export var g_needs_window_update: i32 = 0;
 pub export var g_background_opacity: f32 = 1.0;
 pub export var g_background_blur: i32 = 30;

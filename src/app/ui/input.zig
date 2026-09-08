@@ -385,6 +385,19 @@ pub fn popupSendInput(bytes: [*]const u8, len: c_int) void {
 }
 
 pub fn popupHandleKey(key_raw: u16, mods_raw: u8, event_type_raw: u8, codepoint_raw: u32) void {
+    popupHandleKeyExt(key_raw, mods_raw, event_type_raw, codepoint_raw, 0, 0, null, 0);
+}
+
+pub fn popupHandleKeyExt(
+    key_raw: u16,
+    mods_raw: u8,
+    event_type_raw: u8,
+    codepoint_raw: u32,
+    shifted_codepoint_raw: u32,
+    base_codepoint_raw: u32,
+    text_ptr: ?[*]const u8,
+    text_len: c_int,
+) void {
     // Dead popup: Ctrl-C closes it
     if (@atomicLoad(i32, &g_popup_dead, .seq_cst) != 0) {
         const key_encode = attyx.key_encode;
@@ -406,7 +419,10 @@ pub fn popupHandleKey(key_raw: u16, mods_raw: u8, event_type_raw: u8, codepoint_
     const key: key_encode.KeyCode = std.meta.intToEnum(key_encode.KeyCode, key_raw) catch return;
     const mods: key_encode.Modifiers = @bitCast(mods_raw);
     const event_type: key_encode.EventType = std.meta.intToEnum(key_encode.EventType, event_type_raw) catch return;
-    const cp: u21 = if (codepoint_raw <= 0x10FFFF) @intCast(codepoint_raw) else 0;
+    const cp = validCodepoint(codepoint_raw);
+    const shifted_cp = validCodepoint(shifted_codepoint_raw);
+    const base_cp = validCodepoint(base_codepoint_raw);
+    const text = eventText(text_ptr, text_len);
 
     const cursor_keys_app = eng.state.cursor_keys_app;
     const keypad_app_mode = eng.state.keypad_app_mode;
@@ -414,7 +430,15 @@ pub fn popupHandleKey(key_raw: u16, mods_raw: u8, event_type_raw: u8, codepoint_
 
     var buf: [128]u8 = undefined;
     const encoded = key_encode.encodeKey(
-        .{ .key = key, .mods = mods, .event_type = event_type, .codepoint = cp },
+        .{
+            .key = key,
+            .mods = mods,
+            .event_type = event_type,
+            .codepoint = cp,
+            .shifted_codepoint = shifted_cp,
+            .base_codepoint = base_cp,
+            .text = text,
+        },
         .{ .cursor_keys_app = cursor_keys_app, .keypad_app_mode = keypad_app_mode, .kitty_flags = kitty_flags },
         &buf,
     );
@@ -555,13 +579,29 @@ pub fn sendInput(bytes: [*]const u8, len: c_int) void {
 }
 
 pub fn handleKey(key_raw: u16, mods_raw: u8, event_type_raw: u8, codepoint_raw: u32) void {
+    handleKeyExt(key_raw, mods_raw, event_type_raw, codepoint_raw, 0, 0, null, 0);
+}
+
+pub fn handleKeyExt(
+    key_raw: u16,
+    mods_raw: u8,
+    event_type_raw: u8,
+    codepoint_raw: u32,
+    shifted_codepoint_raw: u32,
+    base_codepoint_raw: u32,
+    text_ptr: ?[*]const u8,
+    text_len: c_int,
+) void {
     const eng = terminal.g_engine orelse return;
     const key_encode = attyx.key_encode;
 
     const key: key_encode.KeyCode = std.meta.intToEnum(key_encode.KeyCode, key_raw) catch return;
     const mods: key_encode.Modifiers = @bitCast(mods_raw);
     const event_type: key_encode.EventType = std.meta.intToEnum(key_encode.EventType, event_type_raw) catch return;
-    const cp: u21 = if (codepoint_raw <= 0x10FFFF) @intCast(codepoint_raw) else 0;
+    const cp = validCodepoint(codepoint_raw);
+    const shifted_cp = validCodepoint(shifted_codepoint_raw);
+    const base_cp = validCodepoint(base_codepoint_raw);
+    const text = eventText(text_ptr, text_len);
 
     const cursor_keys_app = eng.state.cursor_keys_app;
     const keypad_app_mode = eng.state.keypad_app_mode;
@@ -569,7 +609,15 @@ pub fn handleKey(key_raw: u16, mods_raw: u8, event_type_raw: u8, codepoint_raw: 
 
     var buf: [128]u8 = undefined;
     const encoded = key_encode.encodeKey(
-        .{ .key = key, .mods = mods, .event_type = event_type, .codepoint = cp },
+        .{
+            .key = key,
+            .mods = mods,
+            .event_type = event_type,
+            .codepoint = cp,
+            .shifted_codepoint = shifted_cp,
+            .base_codepoint = base_cp,
+            .text = text,
+        },
         .{ .cursor_keys_app = cursor_keys_app, .keypad_app_mode = keypad_app_mode, .kitty_flags = kitty_flags },
         &buf,
     );
@@ -589,6 +637,15 @@ pub fn handleKey(key_raw: u16, mods_raw: u8, event_type_raw: u8, codepoint_raw: 
             _ = posix.write(terminal.g_pty_master, encoded) catch {};
         }
     }
+}
+
+fn validCodepoint(raw: u32) u21 {
+    return if (raw <= 0x10FFFF and !(raw >= 0xD800 and raw <= 0xDFFF)) @intCast(raw) else 0;
+}
+
+fn eventText(ptr: ?[*]const u8, len: c_int) []const u8 {
+    if (ptr == null or len <= 0) return "";
+    return ptr.?[0..@intCast(len)];
 }
 
 pub fn getLinkUri(link_id: u32, buf: [*]u8, buf_len: c_int) c_int {

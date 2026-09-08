@@ -124,6 +124,10 @@ pub fn build(b: *std.Build) void {
 
     // PTY bridge needs libc for openpty/ioctl/fork
     exe.root_module.linkSystemLibrary("c", .{});
+    exe.addCSourceFile(.{
+        .file = b.path("src/app/font_rebuild_req.c"),
+        .flags = &.{"-std=c11"},
+    });
     if (target.result.os.tag == .linux)
         exe.root_module.linkSystemLibrary("util", .{});
 
@@ -342,6 +346,10 @@ pub fn build(b: *std.Build) void {
         });
 
         const app_macos_flags = &.{"-fobjc-arc"};
+        app.addCSourceFile(.{
+            .file = b.path("src/app/font_rebuild_req.c"),
+            .flags = &.{"-std=c11"},
+        });
         app.addCSourceFile(.{ .file = b.path("src/app/platform_macos.m"),  .flags = app_macos_flags });
         app.addCSourceFile(.{ .file = b.path("src/app/macos_font.m"),      .flags = app_macos_flags });
         app.addCSourceFile(.{ .file = b.path("src/app/macos_glyph.m"),     .flags = app_macos_flags });
@@ -397,6 +405,26 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    const atomic_request_tests = b.addExecutable(.{
+        .name = "attyx-atomic-request-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    atomic_request_tests.addCSourceFile(.{
+        .file = b.path("src/app/atomic_requests_test.c"),
+        .flags = &.{"-std=c11"},
+    });
+    atomic_request_tests.addCSourceFile(.{
+        .file = b.path("src/app/font_rebuild_req.c"),
+        .flags = &.{"-std=c11"},
+    });
+    atomic_request_tests.root_module.addIncludePath(b.path("src/app"));
+    atomic_request_tests.root_module.linkSystemLibrary("c", .{});
+    test_step.dependOn(&b.addRunArtifact(atomic_request_tests).step);
 
     const real_daemon_smoke = b.addExecutable(.{
         .name = "attyx-real-daemon-smoke",

@@ -234,7 +234,7 @@ pub export fn attyx_dispatch_action(action_raw: u8) u8 {
             const size = c.g_font_size;
             if (size < 72) {
                 c.g_font_size = size + 2;
-                c.g_needs_font_rebuild = 1;
+                c.attyx_request_font_rebuild();
             }
             return 1;
         },
@@ -242,13 +242,13 @@ pub export fn attyx_dispatch_action(action_raw: u8) u8 {
             const size = c.g_font_size;
             if (size > 6) {
                 c.g_font_size = size - 2;
-                c.g_needs_font_rebuild = 1;
+                c.attyx_request_font_rebuild();
             }
             return 1;
         },
         .font_size_reset => {
             c.g_font_size = c.g_default_font_size;
-            c.g_needs_font_rebuild = 1;
+            c.attyx_request_font_rebuild();
             return 1;
         },
         .open_config => {

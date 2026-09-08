@@ -7,8 +7,18 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 #include "macos_internal.h"
 #include "macos_renderer_private.h"
+
+// Live backing scale of the view's window. Single scale source for the
+// guard and the rebuild path — window.backingScaleFactor is defined even
+// while window.screen is transiently nil during screen transitions.
+static CGFloat liveScale(MTKView* view) {
+    NSWindow* w = view.window;
+    if (w) return w.backingScaleFactor;
+    return [NSScreen mainScreen].backingScaleFactor;
+}
 
 // ---------------------------------------------------------------------------
 // Emit helpers (shared with search bar)
@@ -182,9 +192,9 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
 }
 
 - (void)drawInMTKView:(MTKView*)view {
-    if (g_needs_font_rebuild) {
-        g_needs_font_rebuild = 0;
-        [self rebuildFont:view];
+    int rebuild_reason = attyx_take_font_rebuild_reason();
+    if (rebuild_reason) {
+        [self rebuildFont:view reason:rebuild_reason];
     }
     if (g_needs_window_update) {
         g_needs_window_update = 0;
@@ -194,7 +204,13 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
     attyx_scrollbar_update();
 }
 
-- (void)rebuildFont:(MTKView*)view {
+- (void)publishResize:(int)rows cols:(int)cols {
+    uint32_t gen = atomic_load_explicit(&g_metrics_gen, memory_order_relaxed);
+    atomic_store_explicit(&g_resize_req, attyx_resize_pack(gen, rows, cols),
+                          memory_order_release);
+}
+
+- (void)rebuildFont:(MTKView*)view reason:(int)reason {
     // Release old Core Text font. Metal textures are ARC-managed (released
     // automatically when _glyphCache struct fields are overwritten below).
     if (_glyphCache.font) CFRelease(_glyphCache.font);
@@ -202,8 +218,7 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
     if (_glyphCache.font_italic) CFRelease(_glyphCache.font_italic);
     if (_glyphCache.font_bold_italic) CFRelease(_glyphCache.font_bold_italic);
 
-    NSScreen* screen = view.window.screen ?: [NSScreen mainScreen];
-    CGFloat scale = screen.backingScaleFactor;
+    CGFloat scale = liveScale(view);
     _glyphCache = createGlyphCache(_device, scale);
     ligatureCacheClear();
 
@@ -212,28 +227,70 @@ int emitString(Vertex* v, int i, GlyphCache* gc,
     g_cell_w_pts = (float)g_cell_pt_w;
     g_cell_h_pts = (float)g_cell_pt_h;
 
+    // New metrics are installed: requests packed with older generations are
+    // now stale and rejected by attyx_check_resize. The bump precedes
+    // setContentSize: so the re-entrant size callback (if any) publishes
+    // with the post-bump generation.
+    atomic_fetch_add_explicit(&g_metrics_gen, 1, memory_order_release);
+
     NSWindow* window = view.window;
-    if (window) {
-        [window setContentSize:NSMakeSize(g_cols * g_cell_pt_w + g_padding_left + g_padding_right,
-                                          g_rows * g_cell_pt_h + g_padding_top  + g_padding_bottom)];
+    if (reason == ATTYX_REBUILD_FONT && window) {
+        // Font/config change: preserve the grid, resize the window to fit it
+        // at the new cell size — content size clamped to what fits the
+        // screen (origin is left alone).
+        NSSize target = NSMakeSize(g_cols * g_cell_pt_w + g_padding_left + g_padding_right,
+                                   g_rows * g_cell_pt_h + g_padding_top  + g_padding_bottom);
+        if (window.screen) {
+            NSSize maxContent = [window contentRectForFrameRect:window.screen.visibleFrame].size;
+            if (target.width  > maxContent.width)  target.width  = maxContent.width;
+            if (target.height > maxContent.height) target.height = maxContent.height;
+        }
+        [window setContentSize:target];
+    }
+    // Scale change: the window's point frame is preserved deliberately —
+    // dragging across displays must never resize the window. (The grid may
+    // still shift by the per-scale cell_pt pixel-snapping delta; with an
+    // integer cell_width override it is preserved exactly.)
+
+    // Unconditional coherent republish: bounds × live scale paired with the
+    // metrics just rasterized at that same scale. Never reads drawableSize —
+    // whether or not the drawable has caught up with a screen change, this
+    // publishes the settled-state grid; the guarded callback later
+    // republishes the identical value (no-op suppressed). Also covers the
+    // two no-callback cases: pure scale change (point size unchanged) and
+    // clamped font change (target == current size).
+    {
+        float sc = _glyphCache.scale;
+        CGSize bounds = view.bounds.size;
+        int new_cols = attyx_cells_fit((float)(bounds.width * sc),
+                                       g_padding_left * sc, g_padding_right * sc,
+                                       _glyphCache.glyph_w, ATTYX_MAX_COLS);
+        int new_rows = attyx_cells_fit((float)(bounds.height * sc),
+                                       g_padding_top * sc, g_padding_bottom * sc,
+                                       _glyphCache.glyph_h, ATTYX_MAX_ROWS);
+        [self publishResize:new_rows cols:new_cols];
     }
 
     _fullRedrawNeeded = YES;
 }
 
 - (void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size {
-    float padLpx = g_padding_left  * _glyphCache.scale;
-    float padRpx = g_padding_right * _glyphCache.scale;
-    float padTpx = g_padding_top   * _glyphCache.scale;
-    float padBpx = g_padding_bottom * _glyphCache.scale;
-    int new_cols = (int)((size.width  - padLpx - padRpx) / _glyphCache.glyph_w + 0.01f);
-    int new_rows = (int)((size.height - padTpx - padBpx) / _glyphCache.glyph_h + 0.01f);
-    if (new_cols < 1) new_cols = 1;
-    if (new_rows < 1) new_rows = 1;
-    if (new_cols > ATTYX_MAX_COLS) new_cols = ATTYX_MAX_COLS;
-    if (new_rows > ATTYX_MAX_ROWS) new_rows = ATTYX_MAX_ROWS;
-    g_pending_resize_rows = new_rows;
-    g_pending_resize_cols = new_cols;
+    // Scale-coherence guard: never pair a drawable sized for one screen with
+    // glyph metrics rasterized for another. The rebuild path republishes the
+    // grid once metrics match (rebuildFont:reason:).
+    if (fabs((double)liveScale(view) - (double)_glyphCache.scale) > 0.001) {
+        attyx_request_scale_rebuild();
+        _fullRedrawNeeded = YES;
+        return;
+    }
+    float sc = _glyphCache.scale;
+    int new_cols = attyx_cells_fit((float)size.width,  g_padding_left * sc,
+                                   g_padding_right * sc, _glyphCache.glyph_w,
+                                   ATTYX_MAX_COLS);
+    int new_rows = attyx_cells_fit((float)size.height, g_padding_top * sc,
+                                   g_padding_bottom * sc, _glyphCache.glyph_h,
+                                   ATTYX_MAX_ROWS);
+    [self publishResize:new_rows cols:new_cols];
     _fullRedrawNeeded = YES;
 }
 

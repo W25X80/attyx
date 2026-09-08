@@ -3,6 +3,7 @@
 #import <Cocoa/Cocoa.h>
 #include <string.h>
 #include "macos_input_private.h"
+#include "macos_key_identity.h"
 
 @implementation AttyxView (IMEClipboard)
 
@@ -65,9 +66,22 @@
                 if (cp >= 0x20) attyx_picker_insert_char(cp);
             }
         } else if (g_popup_active) {
-            attyx_popup_send_input((const uint8_t*)utf8, (int)strlen(utf8));
+            int blen = (int)strlen(utf8);
+            if (g_kitty_kbd_flags & 8) {
+                attyx_popup_handle_key_ext(
+                    ATTYX_KEY_CODEPOINT, 0, 1, 0, 0, 0,
+                    (const uint8_t*)utf8, blen);
+            } else {
+                attyx_popup_send_input((const uint8_t*)utf8, blen);
+            }
         } else {
             int blen = (int)strlen(utf8);
+            if (g_kitty_kbd_flags & 8) {
+                attyx_handle_key_ext(
+                    ATTYX_KEY_CODEPOINT, 0, 1, 0, 0, 0,
+                    (const uint8_t*)utf8, blen);
+                return;
+            }
             // Wrap multi-codepoint input in bracketed paste so the shell
             // processes it atomically.  This prevents zsh-syntax-highlighting
             // cursor desync with multi-cell characters like flag emoji.

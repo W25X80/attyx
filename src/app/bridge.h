@@ -79,6 +79,14 @@ void attyx_copy_selection(void);
 // key: KeyCode enum value, mods: modifier bitmask (bit0=shift,1=alt,2=ctrl,3=super),
 // event_type: 1=press,2=repeat,3=release, codepoint: Unicode codepoint (for KeyCode.codepoint)
 void attyx_handle_key(uint16_t key, uint8_t mods, uint8_t event_type, uint32_t codepoint);
+void attyx_handle_key_ext(uint16_t key, uint8_t mods, uint8_t event_type,
+                          uint32_t codepoint, uint32_t shifted_codepoint,
+                          uint32_t base_codepoint, const uint8_t* text,
+                          int text_len);
+void attyx_popup_handle_key_ext(uint16_t key, uint8_t mods, uint8_t event_type,
+                                uint32_t codepoint, uint32_t shifted_codepoint,
+                                uint32_t base_codepoint, const uint8_t* text,
+                                int text_len);
 
 // Update terminal mode flags (called from PTY thread after engine.feed).
 void attyx_set_mode_flags(int bracketed_paste, int cursor_keys_app);
@@ -284,9 +292,18 @@ extern volatile int g_needs_reload_config;
 // Implemented in Zig (terminal.zig).
 void attyx_trigger_config_reload(void);
 
-// Set to 1 by PTY thread when font config changes (family, size, fallbacks, cell dims).
-// Main render thread reads, rebuilds the glyph cache + resizes window, then clears.
-extern volatile int g_needs_font_rebuild;
+// Font rebuild request reasons. FONT has priority over SCALE because it also
+// rebuilds against the live scale and applies the user's font-size change.
+#define ATTYX_REBUILD_FONT  1
+#define ATTYX_REBUILD_SCALE 2
+
+// Publish font configuration before requesting a rebuild. The request calls
+// release preceding producer writes; the take call acquires and clears one
+// pending reason. These functions own the atomic storage; producers and
+// consumers must not access it directly.
+void attyx_request_font_rebuild(void);
+void attyx_request_scale_rebuild(void);
+int attyx_take_font_rebuild_reason(void);
 
 // Set to 1 by PTY thread when window properties change (opacity, blur, decorations, padding).
 // Main render thread reads, applies updates via attyx_apply_window_update(), then clears.
