@@ -171,16 +171,16 @@ export fn attyx_dispatch_action(action_raw: u8) u8 {
         .paste => { attyx_platform_paste(); return 1; },
         .copy_mode_enter => { attyx_copy_mode_enter(); return 1; },
         .font_size_increase => {
-            if (c.g_font_size < 72) { c.g_font_size += 2; c.g_needs_font_rebuild = 1; }
+            if (c.g_font_size < 72) { c.g_font_size += 2; c.attyx_request_font_rebuild(); }
             return 1;
         },
         .font_size_decrease => {
-            if (c.g_font_size > 6) { c.g_font_size -= 2; c.g_needs_font_rebuild = 1; }
+            if (c.g_font_size > 6) { c.g_font_size -= 2; c.attyx_request_font_rebuild(); }
             return 1;
         },
         .font_size_reset => {
             c.g_font_size = c.g_default_font_size;
-            c.g_needs_font_rebuild = 1;
+            c.attyx_request_font_rebuild();
             return 1;
         },
         .send_sequence => {

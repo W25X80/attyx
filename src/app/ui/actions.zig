@@ -712,7 +712,7 @@ pub fn doReloadConfig(ctx: *PtyThreadCtx) void {
         new_cfg.cell_height.encode() != c.g_cell_height;
     if (font_changed) {
         publish.publishFontConfig(&new_cfg);
-        c.g_needs_font_rebuild = 1;
+        c.attyx_request_font_rebuild();
     }
 
     // Theme
@@ -796,4 +796,3 @@ pub fn doReloadConfig(ctx: *PtyThreadCtx) void {
     c.attyx_mark_all_dirty();
     logging.info("config", "reloaded", .{});
 }
-

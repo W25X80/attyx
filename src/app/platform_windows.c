@@ -399,8 +399,8 @@ void attyx_apply_window_update(void) {
         float padPxW = (float)(g_padding_left + g_padding_right) * g_content_scale;
         float padPxH = (float)(g_padding_top + g_padding_bottom) * g_content_scale;
         if (g_native_tabs_enabled) padPxH += ntab_bar_height();
-        int new_cols = (int)((fbW - padPxW) / g_cell_px_w + 0.01f);
-        int new_rows = (int)((fbH - padPxH) / g_cell_px_h + 0.01f);
+        int new_cols = (int)((fbW - padPxW) / g_cell_px_w + 0.001f);
+        int new_rows = (int)((fbH - padPxH) / g_cell_px_h + 0.001f);
         g_pending_resize_rows = new_rows;
         g_pending_resize_cols = new_cols;
     }
@@ -566,8 +566,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 float padPxW = (float)(g_padding_left + g_padding_right) * g_content_scale;
                 float padPxH = (float)(g_padding_top + g_padding_bottom) * g_content_scale;
                 if (g_native_tabs_enabled) padPxH += ntab_bar_height();
-                int new_cols = (int)((w - padPxW) / g_cell_px_w + 0.01f);
-                int new_rows = (int)((h - padPxH) / g_cell_px_h + 0.01f);
+                int new_cols = (int)((w - padPxW) / g_cell_px_w + 0.001f);
+                int new_rows = (int)((h - padPxH) / g_cell_px_h + 0.001f);
                 g_pending_resize_rows = new_rows;
                 g_pending_resize_cols = new_cols;
             }
@@ -585,7 +585,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_cell_px_h = g_cell_h_pts * newScale;
 
         // Trigger font rebuild at new DPI
-        g_needs_font_rebuild = 1;
+        attyx_request_font_rebuild();
 
         // Windows provides the suggested new window rect in lParam
         RECT* suggested = (RECT*)lParam;
@@ -1010,8 +1010,7 @@ void attyx_run(AttyxCell* cells, int cols, int rows) {
         if (g_should_quit) break;
 
         // Check font rebuild
-        if (g_needs_font_rebuild) {
-            g_needs_font_rebuild = 0;
+        if (attyx_take_font_rebuild_reason() != 0) {
             windows_font_cleanup(&g_gc);
             if (windows_font_init(&g_gc, g_d3d_device, g_content_scale)) {
                 ligatureCacheClear();

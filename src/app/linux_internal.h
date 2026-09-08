@@ -359,7 +359,7 @@ void linux_set_error_callback(void);
 void linux_register_callbacks(GLFWwindow* win);
 
 // ---------------------------------------------------------------------------
-// Font rebuild (linux_render.c — called from main loop when g_needs_font_rebuild is set)
+// Font rebuild (linux_render.c — called from the main loop on a bridge request)
 // ---------------------------------------------------------------------------
 
 void linux_rebuild_font(void);
