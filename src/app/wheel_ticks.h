@@ -14,6 +14,8 @@
 #ifndef ATTYX_WHEEL_TICKS_H
 #define ATTYX_WHEEL_TICKS_H
 
+#include <stdint.h>
+
 // Max ticks per event: 2 x ATTYX_MAX_ROWS. Real hardware deltas sit two
 // orders of magnitude below; a synthetic event with a huge delta must not
 // saturate the int cast (C UB) or drive an unbounded emission loop, and
@@ -42,6 +44,37 @@ static inline int attyx_wheel_ticks(double* accum, double dy, int precise,
     int ticks = (int)dy;
     if (ticks == 0) ticks = (dy > 0.0) ? 1 : -1;
     return ticks;
+}
+
+typedef struct {
+    double accum;
+    double cell_h;
+    uint64_t owner;
+    uint64_t context;
+    int initialized;
+} AttyxWheelState;
+
+static inline int attyx_wheel_ticks_routed(AttyxWheelState* state, double dy,
+                                           int precise, double cell_h,
+                                           uint64_t owner, uint64_t context,
+                                           int routed) {
+    if (!routed) {
+        state->accum = 0.0;
+        state->initialized = 0;
+        return 0;
+    }
+
+    double threshold = cell_h > 0.0 ? cell_h : 16.0;
+    if (!state->initialized || state->owner != owner ||
+        state->context != context || state->cell_h != threshold) {
+        state->accum = 0.0;
+        state->cell_h = threshold;
+        state->owner = owner;
+        state->context = context;
+        state->initialized = 1;
+    }
+
+    return attyx_wheel_ticks(&state->accum, dy, precise, threshold);
 }
 
 #endif // ATTYX_WHEEL_TICKS_H

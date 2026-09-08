@@ -59,6 +59,10 @@ int attyx_should_quit(void);
 // Implemented in Zig (terminal.zig).
 void attyx_send_input(const uint8_t* bytes, int len);
 
+// Stable identity of the current input recipient. Used by platform-side
+// gesture state so a fractional wheel delta cannot cross pane boundaries.
+uint64_t attyx_input_route_id(int popup);
+
 // Clear screen and scrollback (Cmd+K / Ctrl+Shift+K).
 // Signals the PTY thread to clear the engine state directly and send
 // a form feed to the shell for prompt redraw.

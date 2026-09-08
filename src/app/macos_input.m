@@ -1058,25 +1058,27 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
 
     if (g_popup_active) {
         if (g_popup_mouse_tracking && g_popup_mouse_sgr) {
-            double accum = (double)_popupScrollAccum;
-            int ticks = attyx_wheel_ticks(&accum, dy, precise, cellH);
-            _popupScrollAccum = (CGFloat)accum;
-            if (ticks == 0) return;
             int col, row;
             mouseCell0(event, self, &col, &row);
             int pc, pr;
-            if (popupHitTest(col, row, &pc, &pr)) {
-                int btn = (ticks > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
-                int n = ticks > 0 ? ticks : -ticks;
-                for (int i = 0; i < n; i++) sendSgrMousePopup(btn, pc, pr, YES);
-            }
+            int routed = popupHitTest(col, row, &pc, &pr);
+            int ticks = attyx_wheel_ticks_routed(
+                &_popupScrollState, dy, precise, cellH,
+                attyx_input_route_id(1), 0, routed);
+            if (ticks == 0) return;
+            int btn = (ticks > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
+            int n = ticks > 0 ? ticks : -ticks;
+            for (int i = 0; i < n; i++) sendSgrMousePopup(btn, pc, pr, YES);
         }
         return;
     }
-    if (g_mouse_tracking && g_mouse_sgr) {
-        double accum = (double)_sgrScrollAccum;
-        int ticks = attyx_wheel_ticks(&accum, dy, precise, cellH);
-        _sgrScrollAccum = (CGFloat)accum;
+    uint64_t modeGen = __atomic_load_n(&g_mouse_mode_gen, __ATOMIC_ACQUIRE);
+    int mouseTracking = __atomic_load_n(&g_mouse_tracking, __ATOMIC_RELAXED);
+    int mouseSgr = __atomic_load_n(&g_mouse_sgr, __ATOMIC_RELAXED);
+    if (mouseTracking && mouseSgr) {
+        int ticks = attyx_wheel_ticks_routed(
+            &_sgrScrollState, dy, precise, cellH,
+            attyx_input_route_id(0), modeGen, 1);
         if (ticks == 0) return;
         int col, row;
         mouseCell(event, self, &col, &row);
@@ -1086,9 +1088,14 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
         return;
     }
 
-    double accum = (double)_scrollAccum;
-    int lines = attyx_wheel_ticks(&accum, dy, precise, cellH);
-    _scrollAccum = (CGFloat)accum;
+    int gcol, grow;
+    mouseCell0(event, self, &gcol, &grow);
+    uint64_t routeContext = g_alt_screen
+        ? UINT64_MAX
+        : ((uint64_t)(uint32_t)gcol << 32) | (uint32_t)grow;
+    int lines = attyx_wheel_ticks_routed(
+        &_scrollState, dy, precise, cellH,
+        attyx_input_route_id(0), routeContext, 1);
     if (lines == 0) return;
 
     // Alt screen (TUI apps without mouse tracking): translate scroll into
@@ -1102,8 +1109,6 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
     }
 
     // Overlay scroll: check before viewport scrollback
-    int gcol, grow;
-    mouseCell0(event, self, &gcol, &grow);
     if (g_overlay_has_actions) {
         if (attyx_overlay_scroll(gcol, grow, lines)) return;
         // Not on overlay — fall through to viewport scroll

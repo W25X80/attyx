@@ -7,27 +7,37 @@
 
 const std = @import("std");
 
-const max_ticks: f64 = 512.0; // mirrors ATTYX_WHEEL_MAX_TICKS
+const wheel = @cImport({
+    @cInclude("wheel_ticks.h");
+});
 
 fn wheelTicks(accum: *f64, dy_in: f64, precise: bool, cell_h: f64) i32 {
-    var dy = dy_in;
-    if (dy != dy) return 0; // NaN guard, mirrors the C helper
-    if (precise) {
-        accum.* += dy;
-        const threshold: f64 = if (cell_h > 0) cell_h else 16.0;
-        const limit = max_ticks * threshold;
-        if (accum.* > limit) accum.* = limit;
-        if (accum.* < -limit) accum.* = -limit;
-        const ticks = @as(i32, @intFromFloat(accum.* / threshold));
-        accum.* -= @as(f64, @floatFromInt(ticks)) * threshold;
-        return ticks;
-    }
-    if (dy == 0) return 0;
-    if (dy > max_ticks) dy = max_ticks;
-    if (dy < -max_ticks) dy = -max_ticks;
-    var ticks = @as(i32, @intFromFloat(dy));
-    if (ticks == 0) ticks = if (dy > 0) 1 else -1;
-    return ticks;
+    return wheel.attyx_wheel_ticks(
+        accum,
+        dy_in,
+        @intFromBool(precise),
+        cell_h,
+    );
+}
+
+fn routedWheelTicks(
+    state: *wheel.AttyxWheelState,
+    dy: f64,
+    precise: bool,
+    cell_h: f64,
+    owner: u64,
+    context: u64,
+    routed: bool,
+) i32 {
+    return wheel.attyx_wheel_ticks_routed(
+        state,
+        dy,
+        @intFromBool(precise),
+        cell_h,
+        owner,
+        context,
+        @intFromBool(routed),
+    );
 }
 
 test "precise: small deltas accumulate, tick only at cell boundary" {
@@ -117,6 +127,39 @@ test "mixed stream: discrete events preserve the precise accumulator residue" {
     try std.testing.expectApproxEqAbs(@as(f64, 14.0), accum, 1e-9);
     // 3px more completes the cell -> 1 tick.
     try std.testing.expectEqual(@as(i32, 1), wheelTicks(&accum, 3.0, true, 17.0));
+}
+
+test "popup route: deltas outside bounds never contaminate residual" {
+    var state: wheel.AttyxWheelState = std.mem.zeroes(wheel.AttyxWheelState);
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        routedWheelTicks(&state, 10.0, true, 17.0, 1, 1, true),
+    );
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        routedWheelTicks(&state, 8.5, true, 17.0, 1, 1, false),
+    );
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        routedWheelTicks(&state, 7.0, true, 17.0, 1, 1, true),
+    );
+    try std.testing.expectApproxEqAbs(@as(f64, 7.0), state.accum, 1e-9);
+}
+
+test "route state: residual never crosses recipient or mode boundaries" {
+    var state: wheel.AttyxWheelState = std.mem.zeroes(wheel.AttyxWheelState);
+    try std.testing.expectEqual(@as(i32, 0), routedWheelTicks(&state, 10.0, true, 17.0, 1, 1, true));
+    try std.testing.expectEqual(@as(i32, 0), routedWheelTicks(&state, 7.0, true, 17.0, 2, 1, true));
+    try std.testing.expectApproxEqAbs(@as(f64, 7.0), state.accum, 1e-9);
+    try std.testing.expectEqual(@as(i32, 0), routedWheelTicks(&state, 7.0, true, 17.0, 2, 2, true));
+    try std.testing.expectApproxEqAbs(@as(f64, 7.0), state.accum, 1e-9);
+}
+
+test "route state: cell-height changes discard incompatible residual" {
+    var state: wheel.AttyxWheelState = std.mem.zeroes(wheel.AttyxWheelState);
+    try std.testing.expectEqual(@as(i32, 0), routedWheelTicks(&state, 16.0, true, 17.0, 1, 1, true));
+    try std.testing.expectEqual(@as(i32, 0), routedWheelTicks(&state, 0.1, true, 8.0, 1, 1, true));
+    try std.testing.expectApproxEqAbs(@as(f64, 0.1), state.accum, 1e-9);
 }
 
 test "NaN delta is ignored and does not poison the accumulator" {

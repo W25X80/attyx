@@ -2,6 +2,7 @@
 #define ATTYX_MACOS_INPUT_PRIVATE_H
 
 #include "macos_internal.h"
+#include "wheel_ticks.h"
 
 @interface AttyxView () {
     int _lastMouseCol;
@@ -9,9 +10,9 @@
     BOOL _leftDown;
     BOOL _rightDown;
     BOOL _middleDown;
-    CGFloat _scrollAccum;
-    CGFloat _sgrScrollAccum;
-    CGFloat _popupScrollAccum;
+    AttyxWheelState _scrollState;
+    AttyxWheelState _sgrScrollState;
+    AttyxWheelState _popupScrollState;
     BOOL _selecting;
     BOOL _splitDragging;
     BOOL _sidebarDragging;

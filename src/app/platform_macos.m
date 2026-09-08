@@ -37,6 +37,7 @@ volatile int g_cursor_keys_app = 0;
 
 volatile int g_mouse_tracking = 0;
 volatile int g_mouse_sgr = 0;
+uint64_t g_mouse_mode_gen = 1;
 
 volatile int g_viewport_offset = 0;
 volatile int g_scrollback_count = 0;
@@ -155,8 +156,10 @@ void attyx_set_mode_flags(int bracketed_paste, int cursor_keys_app) {
 }
 
 void attyx_set_mouse_mode(int tracking, int sgr) {
+    int changed = g_mouse_tracking != tracking || g_mouse_sgr != sgr;
     g_mouse_tracking = tracking;
     g_mouse_sgr = sgr;
+    if (changed) __atomic_add_fetch(&g_mouse_mode_gen, 1, __ATOMIC_RELEASE);
 }
 
 void attyx_mark_all_dirty(void) {
