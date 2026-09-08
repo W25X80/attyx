@@ -9,6 +9,8 @@
 #define GLYPH_ATLAS_DEFAULT_COLS 32
 #define GLYPH_ATLAS_DEFAULT_ROWS 32
 #define GLYPH_ATLAS_MAX_TEXTURE_DIMENSION 16384
+#define GLYPH_ATLAS_MAX_BYTES ((size_t)128u * 1024u * 1024u)
+#define GLYPH_ATLAS_AGGREGATE_BYTES_PER_PIXEL 5
 #define GLYPH_WIDE_BIT (1 << 30)
 #define GLYPH_COLOR_BIT (1 << 29)
 
@@ -23,6 +25,11 @@ typedef struct {
     uint32_t count;
     uint32_t max_capacity;
 } GlyphMap;
+
+typedef struct {
+    bool tripped;
+    bool color_unavailable;
+} GlyphCacheFailureLatch;
 
 typedef struct {
     int cols;
@@ -100,6 +107,13 @@ void glyphMapDeinit(GlyphMap* map);
 int glyphMapLookup(const GlyphMap* map, uint32_t codepoint);
 bool glyphMapPrepareInsert(GlyphMap* map, uint32_t codepoint);
 bool glyphMapInsertPrepared(GlyphMap* map, uint32_t codepoint, int slot);
+
+void glyphCacheFailureLatchReset(GlyphCacheFailureLatch* latch);
+void glyphCacheFailureLatchTrip(GlyphCacheFailureLatch* latch);
+bool glyphCacheFailureLatchAllowsWork(const GlyphCacheFailureLatch* latch);
+void glyphCacheFailureLatchMarkColorUnavailable(GlyphCacheFailureLatch* latch);
+bool glyphCacheFailureLatchAllowsColorWork(const GlyphCacheFailureLatch* latch);
+bool glyphCacheAsciiWarmupCodepoint(int index, uint32_t* codepoint);
 
 bool glyphAtlasInitialGeometry(int glyph_width, int glyph_height,
                                int max_texture_dimension,

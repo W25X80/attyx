@@ -51,6 +51,68 @@ test "glyph map fails explicitly at its bounded maximum" {
     try std.testing.expectEqual(@as(c_int, -1), policy.glyphMapLookup(&map, 99));
 }
 
+test "glyph cache failure latch blocks work until reset" {
+    var latch: policy.GlyphCacheFailureLatch = undefined;
+    policy.glyphCacheFailureLatchReset(&latch);
+    try std.testing.expect(policy.glyphCacheFailureLatchAllowsWork(&latch));
+
+    policy.glyphCacheFailureLatchTrip(&latch);
+    try std.testing.expect(!policy.glyphCacheFailureLatchAllowsWork(&latch));
+
+    policy.glyphCacheFailureLatchTrip(&latch);
+    try std.testing.expect(!policy.glyphCacheFailureLatchAllowsWork(&latch));
+
+    policy.glyphCacheFailureLatchReset(&latch);
+    try std.testing.expect(policy.glyphCacheFailureLatchAllowsWork(&latch));
+}
+
+test "color failure keeps monochrome rasterization enabled" {
+    var latch: policy.GlyphCacheFailureLatch = undefined;
+    policy.glyphCacheFailureLatchReset(&latch);
+
+    policy.glyphCacheFailureLatchMarkColorUnavailable(&latch);
+
+    try std.testing.expect(policy.glyphCacheFailureLatchAllowsWork(&latch));
+}
+
+test "color failure blocks color attempts until cache reset" {
+    var latch: policy.GlyphCacheFailureLatch = undefined;
+    policy.glyphCacheFailureLatchReset(&latch);
+    try std.testing.expect(policy.glyphCacheFailureLatchAllowsColorWork(&latch));
+
+    policy.glyphCacheFailureLatchMarkColorUnavailable(&latch);
+    try std.testing.expect(!policy.glyphCacheFailureLatchAllowsColorWork(&latch));
+
+    policy.glyphCacheFailureLatchReset(&latch);
+    try std.testing.expect(policy.glyphCacheFailureLatchAllowsColorWork(&latch));
+
+    policy.glyphCacheFailureLatchTrip(&latch);
+    try std.testing.expect(!policy.glyphCacheFailureLatchAllowsColorWork(&latch));
+}
+
+test "ASCII warmup rasterizes fallback first and covers printable ASCII once" {
+    var seen = [_]bool{false} ** 95;
+    for (0..seen.len) |index| {
+        var codepoint: u32 = 0;
+        try std.testing.expect(policy.glyphCacheAsciiWarmupCodepoint(
+            @intCast(index),
+            &codepoint,
+        ));
+        if (index == 0) try std.testing.expectEqual(@as(u32, '?'), codepoint);
+        try std.testing.expect(codepoint >= 32 and codepoint <= 126);
+
+        const seen_index: usize = @intCast(codepoint - 32);
+        try std.testing.expect(!seen[seen_index]);
+        seen[seen_index] = true;
+    }
+
+    for (seen) |was_seen| try std.testing.expect(was_seen);
+
+    var codepoint: u32 = 0;
+    try std.testing.expect(!policy.glyphCacheAsciiWarmupCodepoint(-1, &codepoint));
+    try std.testing.expect(!policy.glyphCacheAsciiWarmupCodepoint(95, &codepoint));
+}
+
 test "atlas growth doubles without exceeding Metal height" {
     var growth: policy.GlyphAtlasGrowth = undefined;
     try std.testing.expect(policy.glyphAtlasPlanGrowth(
@@ -122,11 +184,11 @@ test "initial atlas geometry remains within texture limits" {
         &geometry,
     ));
     try std.testing.expectEqual(@as(c_int, 27), geometry.cols);
-    try std.testing.expectEqual(@as(c_int, 27), geometry.rows);
+    try std.testing.expectEqual(@as(c_int, 2), geometry.rows);
     try std.testing.expectEqual(@as(c_int, 16200), geometry.width);
-    try std.testing.expectEqual(@as(c_int, 16200), geometry.height);
-    try std.testing.expectEqual(@as(c_int, 27), geometry.max_rows);
-    try std.testing.expectEqual(@as(c_int, 729), geometry.max_slots);
+    try std.testing.expectEqual(@as(c_int, 1200), geometry.height);
+    try std.testing.expectEqual(@as(c_int, 2), geometry.max_rows);
+    try std.testing.expectEqual(@as(c_int, 54), geometry.max_slots);
 
     try std.testing.expect(!policy.glyphAtlasInitialGeometry(
         policy.GLYPH_ATLAS_MAX_TEXTURE_DIMENSION + 1,
@@ -141,6 +203,39 @@ test "initial atlas geometry remains within texture limits" {
         policy.GLYPH_ATLAS_MAX_TEXTURE_DIMENSION,
         &geometry,
     ));
+}
+
+test "initial atlas geometry reserves one aggregate byte budget for gray and color" {
+    var geometry: policy.GlyphAtlasGeometry = undefined;
+    try std.testing.expect(policy.glyphAtlasInitialGeometry(
+        512,
+        32,
+        policy.GLYPH_ATLAS_MAX_TEXTURE_DIMENSION,
+        &geometry,
+    ));
+
+    try std.testing.expectEqual(@as(c_int, 32), geometry.rows);
+    try std.testing.expectEqual(@as(c_int, 51), geometry.max_rows);
+    try std.testing.expectEqual(@as(c_int, 1632), geometry.max_slots);
+
+    const budget: usize = 128 * 1024 * 1024;
+    var max_bytes: usize = 0;
+    try std.testing.expect(policy.glyphAtlasPixelBytes(
+        geometry.width,
+        geometry.max_rows * 32,
+        5,
+        &max_bytes,
+    ));
+    try std.testing.expect(max_bytes <= budget);
+
+    var one_more_row_bytes: usize = 0;
+    try std.testing.expect(policy.glyphAtlasPixelBytes(
+        geometry.width,
+        (geometry.max_rows + 1) * 32,
+        5,
+        &one_more_row_bytes,
+    ));
+    try std.testing.expect(one_more_row_bytes > budget);
 }
 
 test "pixel byte calculation rejects overflow" {

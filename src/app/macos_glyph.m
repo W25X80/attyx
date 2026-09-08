@@ -19,6 +19,8 @@ extern CTFontRef createFuzzyMatchFont(CFStringRef reqName, CGFloat fontSize);
 /// Characters with EAW = N / Na / H must return false even if the font
 /// happens to draw them wider than one cell (e.g. regional indicators).
 int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
+    if (!glyphCacheCanRasterize(gc)) return glyphCacheFallbackSlot(gc);
+
     int gw = (int)gc->glyph_w;
     int gh = (int)gc->glyph_h;
 
@@ -140,8 +142,17 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
 
         if (isColorEmoji) {
             size_t pixelBytes = 0;
-            if (!glyphCacheEnsureColorTexture(gc)
-                    || !glyphAtlasPixelBytes(renderW, gh, 4, &pixelBytes)) {
+            if (!glyphCacheEnsureColorTexture(gc)) {
+                int fallback = glyphCacheFallbackSlot(gc);
+                glyphCacheInsert(gc, cp, fallback);
+                if (drawFont != gc->font && drawFont != gc->font_bold
+                        && drawFont != gc->font_italic
+                        && drawFont != gc->font_bold_italic)
+                    CFRelease(drawFont);
+                return fallback;
+            }
+            if (!glyphAtlasPixelBytes(renderW, gh, 4, &pixelBytes)) {
+                glyphCacheMarkRasterizationFailure(gc);
                 if (drawFont != gc->font && drawFont != gc->font_bold
                         && drawFont != gc->font_italic
                         && drawFont != gc->font_bold_italic)
@@ -161,6 +172,7 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
             if (!pixels || !ctx) {
                 if (ctx) CGContextRelease(ctx);
                 free(pixels);
+                glyphCacheMarkRasterizationFailure(gc);
                 if (drawFont != gc->font && drawFont != gc->font_bold
                         && drawFont != gc->font_italic
                         && drawFont != gc->font_bold_italic)
@@ -205,6 +217,7 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
     // 6. Create bitmap context (renderW × gh)
     size_t pixelBytes = 0;
     if (!glyphAtlasPixelBytes(renderW, gh, 1, &pixelBytes)) {
+        glyphCacheMarkRasterizationFailure(gc);
         if (drawFont != gc->font && drawFont != gc->font_bold
                 && drawFont != gc->font_italic
                 && drawFont != gc->font_bold_italic)
@@ -222,6 +235,7 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
     if (!pixels || !ctx) {
         if (ctx) CGContextRelease(ctx);
         free(pixels);
+        glyphCacheMarkRasterizationFailure(gc);
         if (drawFont != gc->font && drawFont != gc->font_bold
                 && drawFont != gc->font_italic
                 && drawFont != gc->font_bold_italic)
@@ -404,6 +418,8 @@ static int cpToUtf16(uint32_t cp, UniChar buf[2]) {
 }
 
 int glyphCacheRasterizeCombined(GlyphCache* gc, uint32_t base, uint32_t c1, uint32_t c2) {
+    if (!glyphCacheCanRasterize(gc)) return glyphCacheFallbackSlot(gc);
+
     int gw = (int)gc->glyph_w;
     int gh = (int)gc->glyph_h;
     uint32_t key = combiningKey(base, c1, c2);
@@ -476,6 +492,7 @@ int glyphCacheRasterizeCombined(GlyphCache* gc, uint32_t base, uint32_t c1, uint
 
     size_t pixelBytes = 0;
     if (!glyphAtlasPixelBytes(gw, gh, 1, &pixelBytes)) {
+        glyphCacheMarkRasterizationFailure(gc);
         if (ownFont) CFRelease(drawFont);
         return glyphCacheFallbackSlot(gc);
     }
@@ -488,6 +505,7 @@ int glyphCacheRasterizeCombined(GlyphCache* gc, uint32_t base, uint32_t c1, uint
     if (!pixels || !ctx) {
         if (ctx) CGContextRelease(ctx);
         free(pixels);
+        glyphCacheMarkRasterizationFailure(gc);
         if (ownFont) CFRelease(drawFont);
         return glyphCacheFallbackSlot(gc);
     }

@@ -102,6 +102,7 @@ const LigaResult* shapeLigatureRun(GlyphCache* gc, const uint32_t* cps, int coun
     uint32_t key = ligatureKey(cps, count) ^ ((uint32_t)style << 28);
     LigaResult* cached = ligaCacheLookup(key);
     if (cached) return cached;
+    if (!glyphCacheCanRasterize(gc)) return NULL;
 
     int gw = (int)gc->glyph_w;
     int gh = (int)gc->glyph_h;
@@ -176,8 +177,13 @@ const LigaResult* shapeLigatureRun(GlyphCache* gc, const uint32_t* cps, int coun
     }
     CFRelease(line);
 
+    if (!glyphCacheReserveSlots(gc, count)) return NULL;
+
     size_t pixelBytes = 0;
-    if (!glyphAtlasPixelBytes(totalW, gh, 1, &pixelBytes)) return NULL;
+    if (!glyphAtlasPixelBytes(totalW, gh, 1, &pixelBytes)) {
+        glyphCacheMarkRasterizationFailure(gc);
+        return NULL;
+    }
 
     uint8_t* pixels = calloc(pixelBytes, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
@@ -190,6 +196,7 @@ const LigaResult* shapeLigatureRun(GlyphCache* gc, const uint32_t* cps, int coun
     if (!pixels || !ctx) {
         if (ctx) CGContextRelease(ctx);
         free(pixels);
+        glyphCacheMarkRasterizationFailure(gc);
         return NULL;
     }
     CGContextSetGrayFillColor(ctx, 1.0, 1.0);
@@ -205,11 +212,6 @@ const LigaResult* shapeLigatureRun(GlyphCache* gc, const uint32_t* cps, int coun
     }
     CTFontDrawGlyphs(font, shapedGlyphs, drawPositions, shapedCount, ctx);
     CGContextRelease(ctx);
-
-    if (!glyphCacheReserveSlots(gc, count)) {
-        free(pixels);
-        return NULL;
-    }
 
     LigaResult* result = ligaCacheInsert(key);
     result->count = (int8_t)count;

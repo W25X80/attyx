@@ -112,6 +112,7 @@ typedef struct {
     int            fallback_slot;
     bool           storage_valid;
     bool           capacity_warning_emitted;
+    GlyphCacheFailureLatch failure_latch;
     id<MTLDevice>  device;
 
     GlyphMap       map;
@@ -129,6 +130,8 @@ bool glyphCachePrepareInsert(GlyphCache* gc, uint32_t cp);
 bool glyphCacheInsert(GlyphCache* gc, uint32_t cp, int slot);
 bool glyphCacheReserveSlots(GlyphCache* gc, int slots);
 bool glyphCacheEnsureColorTexture(GlyphCache* gc);
+bool glyphCacheCanRasterize(const GlyphCache* gc);
+void glyphCacheMarkRasterizationFailure(GlyphCache* gc);
 int  glyphCacheFallbackSlot(const GlyphCache* gc);
 int  glyphCacheRasterize(GlyphCache* gc, uint32_t cp);
 uint32_t combiningKey(uint32_t base, uint32_t c1, uint32_t c2);

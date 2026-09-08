@@ -173,7 +173,9 @@ GlyphCache createGlyphCache(id<MTLDevice> device, CGFloat scale) {
 
     glyphCacheInitStorage(&gc);
 
-    for (uint32_t ch = 32; ch < 127; ch++) {
+    for (int index = 0; ; index++) {
+        uint32_t ch = 0;
+        if (!glyphCacheAsciiWarmupCodepoint(index, &ch)) break;
         glyphCacheRasterize(&gc, ch);
     }
     gc.fallback_slot = glyphCacheLookup(&gc, '?');

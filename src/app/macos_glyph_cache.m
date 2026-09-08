@@ -10,6 +10,31 @@ static void glyphCacheWarnOnce(GlyphCache* gc, NSString* reason) {
     NSLog(@"[attyx] glyph cache capacity exhausted: %@", reason);
 }
 
+static void glyphCacheLatchFailure(GlyphCache* gc, NSString* reason) {
+    if (!gc) return;
+    glyphCacheFailureLatchTrip(&gc->failure_latch);
+    glyphCacheWarnOnce(gc, reason);
+}
+
+static void glyphCacheMarkColorUnavailable(GlyphCache* gc, NSString* reason) {
+    if (!gc) return;
+    bool was_available =
+        glyphCacheFailureLatchAllowsColorWork(&gc->failure_latch);
+    glyphCacheFailureLatchMarkColorUnavailable(&gc->failure_latch);
+    if (was_available) {
+        NSLog(@"[attyx] glyph cache color atlas unavailable: %@", reason);
+    }
+}
+
+bool glyphCacheCanRasterize(const GlyphCache* gc) {
+    return gc && gc->storage_valid
+        && glyphCacheFailureLatchAllowsWork(&gc->failure_latch);
+}
+
+void glyphCacheMarkRasterizationFailure(GlyphCache* gc) {
+    glyphCacheLatchFailure(gc, @"glyph rasterization allocation failed");
+}
+
 static id<MTLTexture> createClearedTexture(id<MTLDevice> device,
                                            MTLPixelFormat format,
                                            int width, int height,
@@ -52,6 +77,7 @@ static void setDisabledStorage(GlyphCache* gc) {
     gc->max_slots = 1;
     gc->fallback_slot = 0;
     gc->storage_valid = false;
+    glyphCacheFailureLatchTrip(&gc->failure_latch);
 
     if (!gc->map.entries) glyphMapInit(&gc->map, 8, 8);
 }
@@ -61,6 +87,7 @@ bool glyphCacheInitStorage(GlyphCache* gc) {
 
     gc->fallback_slot = 0;
     gc->capacity_warning_emitted = false;
+    glyphCacheFailureLatchReset(&gc->failure_latch);
 
     GlyphAtlasGeometry geometry;
     if (!glyphAtlasInitialGeometry((int)gc->glyph_w, (int)gc->glyph_h,
@@ -123,6 +150,7 @@ void destroyGlyphCache(GlyphCache* gc) {
     gc->color_texture = nil;
     gc->device = nil;
     gc->storage_valid = false;
+    glyphCacheFailureLatchTrip(&gc->failure_latch);
     gc->next_slot = 0;
     gc->max_slots = 0;
 }
@@ -133,15 +161,16 @@ int glyphCacheLookup(GlyphCache* gc, uint32_t cp) {
 }
 
 bool glyphCachePrepareInsert(GlyphCache* gc, uint32_t cp) {
-    if (!gc || !gc->storage_valid) return false;
+    if (!glyphCacheCanRasterize(gc)) return false;
     if (glyphMapPrepareInsert(&gc->map, cp)) return true;
-    glyphCacheWarnOnce(gc, @"glyph map reached its allocation limit");
+    glyphCacheLatchFailure(gc, @"glyph map reached its allocation limit");
     return false;
 }
 
 bool glyphCacheInsert(GlyphCache* gc, uint32_t cp, int slot) {
-    if (!gc || !glyphMapInsertPrepared(&gc->map, cp, slot)) {
-        if (gc) glyphCacheWarnOnce(gc, @"prepared glyph insertion failed");
+    if (!glyphCacheCanRasterize(gc)
+            || !glyphMapInsertPrepared(&gc->map, cp, slot)) {
+        if (gc) glyphCacheLatchFailure(gc, @"prepared glyph insertion failed");
         return false;
     }
     return true;
@@ -152,14 +181,15 @@ int glyphCacheFallbackSlot(const GlyphCache* gc) {
 }
 
 bool glyphCacheEnsureColorTexture(GlyphCache* gc) {
-    if (!gc || !gc->storage_valid) return false;
+    if (!glyphCacheCanRasterize(gc)) return false;
     if (gc->color_texture) return true;
+    if (!glyphCacheFailureLatchAllowsColorWork(&gc->failure_latch)) return false;
 
     id<MTLTexture> color_texture = createClearedTexture(
         gc->device, MTLPixelFormatBGRA8Unorm,
         gc->atlas_w, gc->atlas_h, 4);
     if (!color_texture) {
-        glyphCacheWarnOnce(gc, @"color atlas allocation failed");
+        glyphCacheMarkColorUnavailable(gc, @"allocation failed");
         return false;
     }
     gc->color_texture = color_texture;
@@ -167,25 +197,26 @@ bool glyphCacheEnsureColorTexture(GlyphCache* gc) {
 }
 
 bool glyphCacheReserveSlots(GlyphCache* gc, int slots) {
-    if (!gc || !gc->storage_valid || slots <= 0) return false;
+    if (!glyphCacheCanRasterize(gc) || slots <= 0) return false;
     if (gc->next_slot <= gc->max_slots - slots) return true;
 
     GlyphAtlasGrowth growth;
+    int max_atlas_height = gc->max_atlas_rows * (int)gc->glyph_h;
     if (!glyphAtlasPlanGrowth(gc->atlas_cols, (int)gc->glyph_h,
                               gc->atlas_rows, gc->next_slot, slots,
-                              GLYPH_ATLAS_MAX_TEXTURE_DIMENSION, &growth)) {
-        glyphCacheWarnOnce(gc, @"Metal texture height limit reached");
+                              max_atlas_height, &growth)) {
+        glyphCacheLatchFailure(gc, @"atlas growth limit reached");
         return false;
     }
 
     size_t gray_bytes = 0;
     if (!glyphAtlasPixelBytes(gc->atlas_w, growth.height, 1, &gray_bytes)) {
-        glyphCacheWarnOnce(gc, @"grayscale atlas size overflow");
+        glyphCacheLatchFailure(gc, @"grayscale atlas size overflow");
         return false;
     }
     uint8_t* gray_pixels = calloc(gray_bytes, 1);
     if (!gray_pixels) {
-        glyphCacheWarnOnce(gc, @"grayscale atlas copy allocation failed");
+        glyphCacheLatchFailure(gc, @"grayscale atlas copy allocation failed");
         return false;
     }
     [gc->texture getBytes:gray_pixels
@@ -199,13 +230,13 @@ bool glyphCacheReserveSlots(GlyphCache* gc, int slots) {
         if (!glyphAtlasPixelBytes(gc->atlas_w, growth.height, 4,
                                   &color_bytes)) {
             free(gray_pixels);
-            glyphCacheWarnOnce(gc, @"color atlas size overflow");
+            glyphCacheLatchFailure(gc, @"color atlas size overflow");
             return false;
         }
         color_pixels = calloc(color_bytes, 1);
         if (!color_pixels) {
             free(gray_pixels);
-            glyphCacheWarnOnce(gc, @"color atlas copy allocation failed");
+            glyphCacheLatchFailure(gc, @"color atlas copy allocation failed");
             return false;
         }
         [gc->color_texture getBytes:color_pixels
@@ -235,7 +266,7 @@ bool glyphCacheReserveSlots(GlyphCache* gc, int slots) {
     if (!gray_texture || (gc->color_texture && !color_texture)) {
         free(gray_pixels);
         free(color_pixels);
-        glyphCacheWarnOnce(gc, @"grown Metal texture allocation failed");
+        glyphCacheLatchFailure(gc, @"grown Metal texture allocation failed");
         return false;
     }
 

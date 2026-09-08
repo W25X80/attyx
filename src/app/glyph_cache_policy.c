@@ -129,6 +129,41 @@ bool glyphMapInsertPrepared(GlyphMap* map, uint32_t codepoint, int slot) {
     return true;
 }
 
+void glyphCacheFailureLatchReset(GlyphCacheFailureLatch* latch) {
+    if (!latch) return;
+    latch->tripped = false;
+    latch->color_unavailable = false;
+}
+
+void glyphCacheFailureLatchTrip(GlyphCacheFailureLatch* latch) {
+    if (latch) latch->tripped = true;
+}
+
+bool glyphCacheFailureLatchAllowsWork(const GlyphCacheFailureLatch* latch) {
+    return latch && !latch->tripped;
+}
+
+void glyphCacheFailureLatchMarkColorUnavailable(GlyphCacheFailureLatch* latch) {
+    if (latch) latch->color_unavailable = true;
+}
+
+bool glyphCacheFailureLatchAllowsColorWork(const GlyphCacheFailureLatch* latch) {
+    return glyphCacheFailureLatchAllowsWork(latch) && !latch->color_unavailable;
+}
+
+bool glyphCacheAsciiWarmupCodepoint(int index, uint32_t* codepoint) {
+    if (!codepoint || index < 0 || index >= 95) return false;
+    if (index == 0) {
+        *codepoint = '?';
+        return true;
+    }
+
+    uint32_t candidate = (uint32_t)(31 + index);
+    if (candidate >= '?') candidate++;
+    *codepoint = candidate;
+    return true;
+}
+
 bool glyphAtlasInitialGeometry(int glyph_width, int glyph_height,
                                int max_texture_dimension,
                                GlyphAtlasGeometry* geometry) {
@@ -141,16 +176,28 @@ bool glyphAtlasInitialGeometry(int glyph_width, int glyph_height,
 
     int cols = max_texture_dimension / glyph_width;
     if (cols > GLYPH_ATLAS_DEFAULT_COLS) cols = GLYPH_ATLAS_DEFAULT_COLS;
+    int64_t width = (int64_t)glyph_width * cols;
+    if (cols < 2 || width <= 0 || width > max_texture_dimension) return false;
+
+    size_t bytes_per_row = 0;
+    if (!glyphAtlasPixelBytes((int)width, glyph_height,
+                              GLYPH_ATLAS_AGGREGATE_BYTES_PER_PIXEL,
+                              &bytes_per_row)
+            || bytes_per_row == 0
+            || bytes_per_row > GLYPH_ATLAS_MAX_BYTES) {
+        return false;
+    }
+
     int max_rows = max_texture_dimension / glyph_height;
+    size_t budget_rows = GLYPH_ATLAS_MAX_BYTES / bytes_per_row;
+    if (budget_rows < (size_t)max_rows) max_rows = (int)budget_rows;
+    if (max_rows <= 0) return false;
+
     int rows = max_rows;
     if (rows > GLYPH_ATLAS_DEFAULT_ROWS) rows = GLYPH_ATLAS_DEFAULT_ROWS;
-    if (cols < 2 || rows <= 0 || max_rows <= 0) return false;
-
-    int64_t width = (int64_t)glyph_width * cols;
     int64_t height = (int64_t)glyph_height * rows;
     int64_t max_slots = (int64_t)cols * max_rows;
-    if (width <= 0 || width > max_texture_dimension
-            || height <= 0 || height > max_texture_dimension
+    if (height <= 0 || height > max_texture_dimension
             || max_slots <= 0 || max_slots > INT_MAX) {
         return false;
     }
