@@ -75,6 +75,14 @@ void attyx_copy_selection(void);
 // key: KeyCode enum value, mods: modifier bitmask (bit0=shift,1=alt,2=ctrl,3=super),
 // event_type: 1=press,2=repeat,3=release, codepoint: Unicode codepoint (for KeyCode.codepoint)
 void attyx_handle_key(uint16_t key, uint8_t mods, uint8_t event_type, uint32_t codepoint);
+void attyx_handle_key_ext(uint16_t key, uint8_t mods, uint8_t event_type,
+                          uint32_t codepoint, uint32_t shifted_codepoint,
+                          uint32_t base_codepoint, const uint8_t* text,
+                          int text_len);
+void attyx_popup_handle_key_ext(uint16_t key, uint8_t mods, uint8_t event_type,
+                                uint32_t codepoint, uint32_t shifted_codepoint,
+                                uint32_t base_codepoint, const uint8_t* text,
+                                int text_len);
 
 // Update terminal mode flags (called from PTY thread after engine.feed).
 void attyx_set_mode_flags(int bracketed_paste, int cursor_keys_app);

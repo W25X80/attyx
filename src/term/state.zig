@@ -148,7 +148,9 @@ pub const TerminalState = struct {
 
     /// Kitty keyboard protocol flags stack (max 16 entries).
     kitty_kbd_flags: [16]u5 = .{0} ** 16,
-    kitty_kbd_stack_len: u4 = 0,
+    kitty_kbd_stack_len: u5 = 0,
+    inactive_kitty_kbd_flags: [16]u5 = .{0} ** 16,
+    inactive_kitty_kbd_stack_len: u5 = 0,
 
     pub fn init(allocator: std.mem.Allocator, rows: usize, cols: usize, scrollback_lines: usize) !TerminalState {
         var main_ring = try RingBuffer.init(allocator, rows, cols, scrollback_lines);

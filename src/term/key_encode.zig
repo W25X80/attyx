@@ -58,6 +58,15 @@ pub const KeyCode = enum(u16) {
 
     // A Unicode codepoint (printable key). The actual codepoint is in KeyEvent.codepoint.
     codepoint,
+
+    left_shift,
+    left_control,
+    left_alt,
+    left_super,
+    right_shift,
+    right_control,
+    right_alt,
+    right_super,
 };
 
 pub const Modifiers = packed struct(u8) {
@@ -92,6 +101,9 @@ pub const KeyEvent = struct {
     mods: Modifiers = .{},
     event_type: EventType = .press,
     codepoint: u21 = 0,
+    shifted_codepoint: u21 = 0,
+    base_codepoint: u21 = 0,
+    text: []const u8 = "",
 };
 
 pub const EncoderState = struct {
@@ -103,7 +115,9 @@ pub const EncoderState = struct {
 // Kitty flag bits
 const KITTY_DISAMBIGUATE: u5 = 1;
 const KITTY_EVENT_TYPES: u5 = 2;
+const KITTY_ALTERNATE_KEYS: u5 = 4;
 const KITTY_ALL_KEYS: u5 = 8;
+const KITTY_ASSOCIATED_TEXT: u5 = 16;
 
 /// Encode a key event into an escape sequence.
 /// Returns a slice of `out` containing the encoded bytes.
@@ -152,11 +166,11 @@ fn encodeXterm(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const 
         },
 
         .home, .end => {
-            return encodeHomeEnd(event.key, mods, .press, out);
+            return encodeHomeEnd(event.key, mods, enc_state.cursor_keys_app, .press, out);
         },
 
         .f1, .f2, .f3, .f4 => {
-            return encodeFKey1to4(event.key, mods, .press, out);
+            return encodeFKey1to4(event.key, mods, .press, true, out);
         },
 
         .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 => {
@@ -174,6 +188,9 @@ fn encodeXterm(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const 
         .codepoint => {
             return encodeCodepoint(event.codepoint, mods, out);
         },
+        .left_shift, .left_control, .left_alt, .left_super,
+        .right_shift, .right_control, .right_alt, .right_super,
+        => return out[0..0],
     }
 }
 
@@ -212,7 +229,7 @@ fn encodeArrow(key: KeyCode, mods: Modifiers, app_mode: bool, event: EventType, 
     return out[0..3];
 }
 
-fn encodeHomeEnd(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8) []const u8 {
+fn encodeHomeEnd(key: KeyCode, mods: Modifiers, app_mode: bool, event: EventType, out: *[128]u8) []const u8 {
     const letter: u8 = if (key == .home) 'H' else 'F';
     if (event != .press) {
         return bufPrint(out, "\x1b[1;{d}:{d}{c}", .{ mods.toCSI(), @intFromEnum(event), letter });
@@ -220,19 +237,25 @@ fn encodeHomeEnd(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8)
     if (mods.any()) {
         return bufPrint(out, "\x1b[1;{d}{c}", .{ mods.toCSI(), letter });
     }
+    if (app_mode) {
+        out[0] = 0x1b;
+        out[1] = 'O';
+        out[2] = letter;
+        return out[0..3];
+    }
     out[0] = 0x1b;
     out[1] = '[';
     out[2] = letter;
     return out[0..3];
 }
 
-fn encodeFKey1to4(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8) []const u8 {
-    // F3's letter form (CSI R) collides with the Cursor Position Report;
-    // kitty encodes any parameterized F3 as CSI 13 ~ (the spec removed the
-    // CSI R form). crossterm routes digit-prefixed R-final sequences to its
-    // CPR parser, which would silently drop CSI 1;1:3 R.
-    if (key == .f3 and event != .press) {
-        return bufPrint(out, "\x1b[13;{d}:{d}~", .{ mods.toCSI(), @intFromEnum(event) });
+fn encodeFKey1to4(key: KeyCode, mods: Modifiers, event: EventType, legacy_mode: bool, out: *[128]u8) []const u8 {
+    if (key == .f3 and (!legacy_mode or mods.any() or event != .press)) {
+        if (event != .press) {
+            return bufPrint(out, "\x1b[13;{d}:{d}~", .{ mods.toCSI(), @intFromEnum(event) });
+        }
+        if (mods.any()) return bufPrint(out, "\x1b[13;{d}~", .{mods.toCSI()});
+        return writeStr(out, "\x1b[13~");
     }
     const letter: u8 = switch (key) {
         .f1 => 'P',
@@ -246,6 +269,12 @@ fn encodeFKey1to4(key: KeyCode, mods: Modifiers, event: EventType, out: *[128]u8
     }
     if (mods.any()) {
         return bufPrint(out, "\x1b[1;{d}{c}", .{ mods.toCSI(), letter });
+    }
+    if (!legacy_mode) {
+        out[0] = 0x1b;
+        out[1] = '[';
+        out[2] = letter;
+        return out[0..3];
     }
     out[0] = 0x1b;
     out[1] = 'O';
@@ -411,81 +440,95 @@ fn encodeKitty(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const 
         if (ev.event_type == .repeat) ev.event_type = .press;
     }
 
-    // all_keys flag: everything uses CSI u format
-    if (flags & KITTY_ALL_KEYS != 0) {
-        return encodeKittyCSIu(ev, enc_state, out);
-    }
+    const report_all = flags & KITTY_ALL_KEYS != 0;
+    const enhanced = flags & (KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES | KITTY_ALL_KEYS) != 0;
 
-    // Enter/Tab/Backspace never get release events unless all_keys is set —
-    // "so that the user can still type reset at a shell prompt when a
-    // program that sets this mode ends without resetting it" (kitty spec,
-    // Report event types).
-    if (ev.event_type == .release) {
-        switch (ev.key) {
-            .enter, .tab, .backspace => return out[0..0],
-            else => {},
-        }
-    }
-
-    // disambiguate flag: only ambiguous keys use CSI u.
-    // Functional keys keep their legacy sequences; non-press events carry
-    // the :{event} sub-parameter (parameterized legacy form).
-    if (flags & KITTY_DISAMBIGUATE != 0) {
-        switch (ev.key) {
-            .up, .down, .left, .right => {
-                return encodeArrow(ev.key, ev.mods, enc_state.cursor_keys_app, ev.event_type, out);
-            },
-            .home, .end => return encodeHomeEnd(ev.key, ev.mods, ev.event_type, out),
-            .f1, .f2, .f3, .f4 => return encodeFKey1to4(ev.key, ev.mods, ev.event_type, out),
-            .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 => return encodeFKey5to12(ev.key, ev.mods, ev.event_type, out),
-            .page_up, .page_down, .insert, .delete => return encodeTildeKey(ev.key, ev.mods, ev.event_type, out),
-            // Numpad keys always use CSI u in Kitty (distinct codepoints)
-            .kp_0, .kp_1, .kp_2, .kp_3, .kp_4, .kp_5, .kp_6, .kp_7, .kp_8, .kp_9, .kp_decimal, .kp_divide, .kp_multiply, .kp_minus, .kp_plus, .kp_enter, .kp_equal => {
-                return encodeKittyCSIu(ev, enc_state, out);
-            },
-            // Ambiguous keys use CSI u
-            .enter, .tab, .backspace, .escape, .codepoint => {
-                return encodeKittyCSIu(ev, enc_state, out);
-            },
-        }
-    }
-
-    // event_types without disambiguate: presses keep plain xterm encoding;
-    // non-press functional keys use the parameterized legacy form (what
-    // kitty itself emits — CSI-u functional codepoints are reserved for
-    // modes the app opted into); non-press CSI-u keys use CSI u.
-    if (ev.event_type != .press) {
-        switch (ev.key) {
-            .up, .down, .left, .right => {
-                return encodeArrow(ev.key, ev.mods, enc_state.cursor_keys_app, ev.event_type, out);
-            },
-            .home, .end => return encodeHomeEnd(ev.key, ev.mods, ev.event_type, out),
-            .f1, .f2, .f3, .f4 => return encodeFKey1to4(ev.key, ev.mods, ev.event_type, out),
-            .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 => return encodeFKey5to12(ev.key, ev.mods, ev.event_type, out),
-            .page_up, .page_down, .insert, .delete => return encodeTildeKey(ev.key, ev.mods, ev.event_type, out),
-            else => return encodeKittyCSIu(ev, enc_state, out),
-        }
-    }
-    return encodeXterm(ev, enc_state, out);
+    return switch (ev.key) {
+        .up, .down, .left, .right =>
+        encodeArrow(ev.key, ev.mods, enc_state.cursor_keys_app and !enhanced, ev.event_type, out),
+        .home, .end =>
+        encodeHomeEnd(ev.key, ev.mods, enc_state.cursor_keys_app and !enhanced, ev.event_type, out),
+        .f1, .f2, .f3, .f4 =>
+        encodeFKey1to4(ev.key, ev.mods, ev.event_type, !enhanced, out),
+        .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12 =>
+        encodeFKey5to12(ev.key, ev.mods, ev.event_type, out),
+        .page_up, .page_down, .insert, .delete =>
+        encodeTildeKey(ev.key, ev.mods, ev.event_type, out),
+        .enter, .tab, .backspace => blk: {
+            if (!report_all and !ev.mods.any() and ev.event_type == .release)
+                break :blk out[0..0];
+            if (!report_all and !ev.mods.any()) break :blk encodeXterm(ev, enc_state, out);
+            if (!enhanced) break :blk encodeXterm(ev, enc_state, out);
+            break :blk encodeKittyCSIu(ev, flags, out);
+        },
+        .escape => if (enhanced)
+            encodeKittyCSIu(ev, flags, out)
+        else
+            encodeXterm(ev, enc_state, out),
+        .kp_0, .kp_1, .kp_2, .kp_3, .kp_4, .kp_5, .kp_6, .kp_7, .kp_8, .kp_9,
+        .kp_decimal, .kp_divide, .kp_multiply, .kp_minus, .kp_plus, .kp_enter, .kp_equal,
+        => if (enhanced)
+            encodeKittyCSIu(ev, flags, out)
+        else
+            encodeXterm(ev, enc_state, out),
+        .codepoint => blk: {
+            if (!report_all and textProducing(ev)) {
+                if (ev.event_type == .release) break :blk out[0..0];
+                break :blk encodeEventText(ev, out);
+            }
+            if (!enhanced) break :blk encodeXterm(ev, enc_state, out);
+            break :blk encodeKittyCSIu(ev, flags, out);
+        },
+        .left_shift, .left_control, .left_alt, .left_super,
+        .right_shift, .right_control, .right_alt, .right_super,
+        => if (report_all) encodeKittyCSIu(ev, flags, out) else out[0..0],
+    };
 }
 
-fn encodeKittyCSIu(event: KeyEvent, enc_state: EncoderState, out: *[128]u8) []const u8 {
-    const flags = enc_state.kitty_flags;
+fn encodeKittyCSIu(event: KeyEvent, flags: u5, out: *[128]u8) []const u8 {
     const cp: u21 = kittyCodepoint(event);
-
     const mod_val = event.mods.toCSI();
     const need_event = (flags & KITTY_EVENT_TYPES != 0) and event.event_type != .press;
-    const need_mods = mod_val > 1 or need_event;
+    const shifted = if (flags & KITTY_ALTERNATE_KEYS != 0 and event.mods.shift)
+        event.shifted_codepoint
+    else
+        0;
+    const base = if (flags & KITTY_ALTERNATE_KEYS != 0) event.base_codepoint else 0;
+    const need_alternates = shifted != 0 or base != 0;
+    const need_text = flags & KITTY_ASSOCIATED_TEXT != 0 and
+        flags & KITTY_ALL_KEYS != 0 and event.event_type != .release and
+        validAssociatedText(event.text);
+    const need_second = mod_val > 1 or need_event;
 
-    if (need_mods) {
-        if (need_event) {
-            const et: u8 = @intFromEnum(event.event_type);
-            return bufPrint(out, "\x1b[{d};{d}:{d}u", .{ cp, mod_val, et });
+    var pos: usize = 0;
+    if (!appendBytes(out, &pos, "\x1b[") or !appendInt(out, &pos, cp)) return out[0..0];
+    if (need_alternates) {
+        if (!appendByte(out, &pos, ':')) return out[0..0];
+        if (shifted != 0 and !appendInt(out, &pos, shifted)) return out[0..0];
+        if (base != 0) {
+            if (!appendByte(out, &pos, ':') or !appendInt(out, &pos, base)) return out[0..0];
         }
-        return bufPrint(out, "\x1b[{d};{d}u", .{ cp, mod_val });
     }
-
-    return bufPrint(out, "\x1b[{d}u", .{cp});
+    if (need_second or need_text) {
+        if (!appendByte(out, &pos, ';')) return out[0..0];
+        if (need_second and !appendInt(out, &pos, mod_val)) return out[0..0];
+        if (need_event) {
+            if (!appendByte(out, &pos, ':') or
+                !appendInt(out, &pos, @intFromEnum(event.event_type))) return out[0..0];
+        }
+    }
+    if (need_text) {
+        var view = std.unicode.Utf8View.init(event.text) catch return out[0..0];
+        var iterator = view.iterator();
+        var first = true;
+        while (iterator.nextCodepoint()) |text_cp| {
+            if (!appendByte(out, &pos, if (first) ';' else ':') or
+                !appendInt(out, &pos, text_cp)) return out[0..0];
+            first = false;
+        }
+    }
+    if (!appendByte(out, &pos, 'u')) return out[0..0];
+    return out[0..pos];
 }
 
 fn kittyCodepoint(event: KeyEvent) u21 {
@@ -534,7 +577,40 @@ fn kittyCodepoint(event: KeyEvent) u21 {
         .kp_enter => 57414,
         .kp_equal => 57415,
         .codepoint => event.codepoint,
+        .left_shift => 57441,
+        .left_control => 57442,
+        .left_alt => 57443,
+        .left_super => 57444,
+        .right_shift => 57447,
+        .right_control => 57448,
+        .right_alt => 57449,
+        .right_super => 57450,
     };
+}
+
+fn textProducing(event: KeyEvent) bool {
+    if (validAssociatedText(event.text)) return true;
+    return event.codepoint != 0 and !event.mods.alt and !event.mods.ctrl and !event.mods.super_key;
+}
+
+fn validAssociatedText(text: []const u8) bool {
+    if (text.len == 0) return false;
+    var view = std.unicode.Utf8View.init(text) catch return false;
+    var iterator = view.iterator();
+    while (iterator.nextCodepoint()) |cp| {
+        if (cp < 0x20 or (cp >= 0x7F and cp <= 0x9F)) return false;
+    }
+    return true;
+}
+
+fn encodeEventText(event: KeyEvent, out: *[128]u8) []const u8 {
+    if (event.text.len != 0) return writeStr(out, event.text);
+    const cp = if (event.mods.shift and event.shifted_codepoint != 0)
+        event.shifted_codepoint
+    else
+        event.codepoint;
+    const utf8_len = std.unicode.utf8Encode(cp, out[0..4]) catch return out[0..0];
+    return out[0..utf8_len];
 }
 
 // ---------------------------------------------------------------------------
@@ -542,8 +618,29 @@ fn kittyCodepoint(event: KeyEvent) u21 {
 // ---------------------------------------------------------------------------
 
 fn writeStr(out: *[128]u8, s: []const u8) []const u8 {
+    if (s.len > out.len) return out[0..0];
     @memcpy(out[0..s.len], s);
     return out[0..s.len];
+}
+
+fn appendBytes(out: *[128]u8, pos: *usize, bytes: []const u8) bool {
+    if (bytes.len > out.len - pos.*) return false;
+    @memcpy(out[pos.* .. pos.* + bytes.len], bytes);
+    pos.* += bytes.len;
+    return true;
+}
+
+fn appendByte(out: *[128]u8, pos: *usize, byte: u8) bool {
+    if (pos.* == out.len) return false;
+    out[pos.*] = byte;
+    pos.* += 1;
+    return true;
+}
+
+fn appendInt(out: *[128]u8, pos: *usize, value: anytype) bool {
+    const rendered = std.fmt.bufPrint(out[pos.*..], "{d}", .{value}) catch return false;
+    pos.* += rendered.len;
+    return true;
 }
 
 fn bufPrint(out: *[128]u8, comptime fmt: []const u8, args: anytype) []const u8 {

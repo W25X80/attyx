@@ -16,4 +16,6 @@ test {
     _ = @import("tests/erase.zig");
     _ = @import("tests/state_resize_extra.zig");
     _ = @import("tests/resize_rounding.zig");
+    _ = @import("tests/macos_key_identity.zig");
+    _ = @import("tests/glfw_char_gate.zig");
 }

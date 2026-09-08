@@ -15,6 +15,8 @@ const c = @cImport({
 export fn attyx_send_input(_: [*]const u8, _: c_int) void {}
 export fn attyx_clear_screen() void {}
 export fn attyx_handle_key(_: u16, _: u8, _: u8, _: u32) void {}
+export fn attyx_handle_key_ext(_: u16, _: u8, _: u8, _: u32, _: u32, _: u32, _: ?[*]const u8, _: c_int) void {}
+export fn attyx_popup_handle_key_ext(_: u16, _: u8, _: u8, _: u32, _: u32, _: u32, _: ?[*]const u8, _: c_int) void {}
 export fn attyx_get_link_uri(_: u32, _: [*]u8, _: c_int) c_int { return 0; }
 export var g_needs_reload_config: i32 = 0;
 export var g_kitty_kbd_flags: i32 = 0;

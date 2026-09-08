@@ -313,9 +313,15 @@ export fn attyx_split_drag_end() void { input.splitDragEnd(); }
 export fn attyx_popup_toggle(index: c_int) void { input.popupToggle(index); }
 export fn attyx_popup_send_input(bytes: [*]const u8, len: c_int) void { input.popupSendInput(bytes, len); }
 export fn attyx_popup_handle_key(k: u16, m: u8, e: u8, cp: u32) void { input.popupHandleKey(k, m, e, cp); }
+export fn attyx_popup_handle_key_ext(k: u16, m: u8, e: u8, cp: u32, shifted: u32, base: u32, text: ?[*]const u8, len: c_int) void {
+    input.popupHandleKeyExt(k, m, e, cp, shifted, base, text, len);
+}
 export fn attyx_send_input(bytes: [*]const u8, len: c_int) void { input.sendInput(bytes, len); }
 export fn attyx_clear_screen() void { input.clearScreen(); }
 export fn attyx_handle_key(k: u16, m: u8, e: u8, cp: u32) void { input.handleKey(k, m, e, cp); }
+export fn attyx_handle_key_ext(k: u16, m: u8, e: u8, cp: u32, shifted: u32, base: u32, text: ?[*]const u8, len: c_int) void {
+    input.handleKeyExt(k, m, e, cp, shifted, base, text, len);
+}
 export fn attyx_get_link_uri(link_id: u32, buf: [*]u8, buf_len: c_int) c_int { return input.getLinkUri(link_id, buf, buf_len); }
 export fn attyx_trigger_config_reload() void {
     @atomicStore(i32, &g_needs_reload_config, 1, .seq_cst);

@@ -40,7 +40,7 @@ test "kitty disamb+events: arrow press bytes frozen" {
     try testing.expectEqualStrings("\x1b[B", r);
 }
 
-test "kitty disamb+events: arrow press in DECCKM app mode frozen (SS3)" {
+test "kitty disamb+events: arrow press ignores DECCKM and stays canonical" {
     var buf: [128]u8 = undefined;
     const flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
     const r = encodeKey(
@@ -48,7 +48,7 @@ test "kitty disamb+events: arrow press in DECCKM app mode frozen (SS3)" {
         .{ .kitty_flags = flags, .cursor_keys_app = true },
         &buf,
     );
-    try testing.expectEqualStrings("\x1bOB", r);
+    try testing.expectEqualStrings("\x1b[B", r);
 }
 
 test "kitty disamb+events: arrow release in DECCKM app mode uses CSI, never SS3" {
@@ -134,11 +134,21 @@ test "kitty disamb+events: F3 repeat uses tilde form" {
     try testing.expectEqualStrings("\x1b[13;1:2~", r);
 }
 
-test "kitty disamb+events: F3 press bytes frozen (SS3)" {
+test "kitty disamb+events: F3 press uses CPR-safe canonical form" {
     var buf: [128]u8 = undefined;
     const flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
     const r = encodeKey(.{ .key = .f3 }, .{ .kitty_flags = flags }, &buf);
-    try testing.expectEqualStrings("\x1bOR", r);
+    try testing.expectEqualStrings("\x1b[13~", r);
+}
+
+test "kitty disambiguate: modified F3 press uses CPR-safe tilde form" {
+    var buf: [128]u8 = undefined;
+    const r = encodeKey(
+        .{ .key = .f3, .mods = .{ .shift = true } },
+        .{ .kitty_flags = KITTY_DISAMBIGUATE },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[13;2~", r);
 }
 
 test "kitty disamb+events: tilde-form releases (F5, PgUp, Delete)" {
@@ -164,18 +174,88 @@ test "kitty disamb+events: tilde-form releases (F5, PgUp, Delete)" {
     try testing.expectEqualStrings("\x1b[3;1:3~", del);
 }
 
-test "kitty disamb+events: enter/tab/backspace releases are suppressed" {
+test "kitty event-types: unmodified legacy-byte presses stay legacy and releases drop" {
     var buf: [128]u8 = undefined;
-    const flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
-    const keys = [_]ke.KeyCode{ .enter, .tab, .backspace };
-    for (keys) |k| {
-        const r = encodeKey(
-            .{ .key = k, .event_type = .release },
-            .{ .kitty_flags = flags },
+    const cases = [_]struct { key: ke.KeyCode, press: []const u8 }{
+        .{ .key = .enter, .press = "\r" },
+        .{ .key = .tab, .press = "\t" },
+        .{ .key = .backspace, .press = "\x7f" },
+    };
+    for (cases) |case| {
+        const press = encodeKey(
+            .{ .key = case.key },
+            .{ .kitty_flags = KITTY_EVENT_TYPES },
             &buf,
         );
-        try testing.expectEqual(@as(usize, 0), r.len);
+        try testing.expectEqualStrings(case.press, press);
+        const release = encodeKey(
+            .{ .key = case.key, .event_type = .release },
+            .{ .kitty_flags = KITTY_EVENT_TYPES },
+            &buf,
+        );
+        try testing.expectEqual(@as(usize, 0), release.len);
     }
+}
+
+test "kitty event-types: modified legacy-byte releases use CSI u" {
+    var buf: [128]u8 = undefined;
+    const cases = [_]struct { key: ke.KeyCode, release: []const u8 }{
+        .{ .key = .enter, .release = "\x1b[13;5:3u" },
+        .{ .key = .tab, .release = "\x1b[9;5:3u" },
+        .{ .key = .backspace, .release = "\x1b[127;5:3u" },
+    };
+    const flag_sets = [_]u5{
+        KITTY_EVENT_TYPES,
+        KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES,
+    };
+    for (flag_sets) |flags| {
+        for (cases) |case| {
+            const release = encodeKey(
+                .{
+                    .key = case.key,
+                    .mods = .{ .ctrl = true },
+                    .event_type = .release,
+                },
+                .{ .kitty_flags = flags },
+                &buf,
+            );
+            try testing.expectEqualStrings(case.release, release);
+        }
+    }
+}
+
+test "kitty disamb+events: text release is suppressed and repeat stays text" {
+    var buf: [128]u8 = undefined;
+    const flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
+    const release = encodeKey(
+        .{ .key = .codepoint, .codepoint = 'A', .mods = .{ .shift = true }, .event_type = .release },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqual(@as(usize, 0), release.len);
+    const repeat = encodeKey(
+        .{ .key = .codepoint, .codepoint = 'A', .mods = .{ .shift = true }, .event_type = .repeat },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("A", repeat);
+}
+
+test "kitty disamb+events: control-key events remain reportable" {
+    var buf: [128]u8 = undefined;
+    const flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
+    const repeat = encodeKey(
+        .{ .key = .codepoint, .codepoint = 'a', .mods = .{ .ctrl = true }, .event_type = .repeat },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[97;5:2u", repeat);
+    const release = encodeKey(
+        .{ .key = .codepoint, .codepoint = 'a', .mods = .{ .ctrl = true }, .event_type = .release },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[97;5:3u", release);
 }
 
 test "kitty all_keys+events: enter release still emitted (all_keys path frozen)" {
@@ -229,7 +309,7 @@ test "kitty disamb only: arrow repeat still encodes as plain press" {
     try testing.expectEqualStrings("\x1b[B", r);
 }
 
-test "kitty all_keys+events: arrow release stays CSI u (path frozen)" {
+test "kitty all_keys+events: arrow release keeps canonical functional form" {
     var buf: [128]u8 = undefined;
     const flags = KITTY_ALL_KEYS | KITTY_EVENT_TYPES;
     const r = encodeKey(
@@ -237,7 +317,18 @@ test "kitty all_keys+events: arrow release stays CSI u (path frozen)" {
         .{ .kitty_flags = flags },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[57420;1:3u", r);
+    try testing.expectEqualStrings("\x1b[1;1:3B", r);
+}
+
+test "kitty all_keys+events: modifier release is emitted" {
+    var buf: [128]u8 = undefined;
+    const flags = KITTY_ALL_KEYS | KITTY_EVENT_TYPES;
+    const r = encodeKey(
+        .{ .key = .right_alt, .event_type = .release },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[57449;1:3u", r);
 }
 
 test "kitty events-only: tilde-key release uses legacy form, not CSI u" {
