@@ -54,6 +54,26 @@ typedef struct {
     int initialized;
 } AttyxWheelState;
 
+static inline uint64_t attyx_mouse_mode_snapshot_pack(uint32_t generation,
+                                                       int tracking,
+                                                       int sgr) {
+    return ((uint64_t)generation << 32)
+         | ((uint64_t)(uint16_t)tracking)
+         | ((uint64_t)(sgr != 0) << 16);
+}
+
+static inline uint32_t attyx_mouse_mode_snapshot_generation(uint64_t snapshot) {
+    return (uint32_t)(snapshot >> 32);
+}
+
+static inline int attyx_mouse_mode_snapshot_tracking(uint64_t snapshot) {
+    return (int)(snapshot & UINT16_MAX);
+}
+
+static inline int attyx_mouse_mode_snapshot_sgr(uint64_t snapshot) {
+    return (int)((snapshot >> 16) & 1u);
+}
+
 static inline int attyx_wheel_ticks_routed(AttyxWheelState* state, double dy,
                                            int precise, double cell_h,
                                            uint64_t owner, uint64_t context,

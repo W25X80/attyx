@@ -162,6 +162,19 @@ test "route state: cell-height changes discard incompatible residual" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.1), state.accum, 1e-9);
 }
 
+test "mouse mode snapshot publishes flags and generation together" {
+    const initial = wheel.attyx_mouse_mode_snapshot_pack(7, 0, 0);
+    try std.testing.expectEqual(@as(u32, 7), wheel.attyx_mouse_mode_snapshot_generation(initial));
+    try std.testing.expectEqual(@as(c_int, 0), wheel.attyx_mouse_mode_snapshot_tracking(initial));
+    try std.testing.expectEqual(@as(c_int, 0), wheel.attyx_mouse_mode_snapshot_sgr(initial));
+
+    const changed = wheel.attyx_mouse_mode_snapshot_pack(8, 3, 1);
+    try std.testing.expect(initial != changed);
+    try std.testing.expectEqual(@as(u32, 8), wheel.attyx_mouse_mode_snapshot_generation(changed));
+    try std.testing.expectEqual(@as(c_int, 3), wheel.attyx_mouse_mode_snapshot_tracking(changed));
+    try std.testing.expectEqual(@as(c_int, 1), wheel.attyx_mouse_mode_snapshot_sgr(changed));
+}
+
 test "NaN delta is ignored and does not poison the accumulator" {
     var accum: f64 = 5.0;
     const nan = std.math.nan(f64);

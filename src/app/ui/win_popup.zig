@@ -70,8 +70,10 @@ pub fn drainPopupPty(ctx: *WinCtx, buf: []u8) void {
     if (got_data) {
         const cfg = ctx.popup_configs[ps.config_index];
         ps.publishCells(ctx.theme, cfg);
-        c.g_popup_mouse_tracking = @intFromEnum(ps.pane.engine.state.mouse_tracking);
-        c.g_popup_mouse_sgr = @intFromBool(ps.pane.engine.state.mouse_sgr);
+        c.attyx_set_popup_mouse_mode(
+            @intFromEnum(ps.pane.engine.state.mouse_tracking),
+            @intFromBool(ps.pane.engine.state.mouse_sgr),
+        );
     }
 }
 

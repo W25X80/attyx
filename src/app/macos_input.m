@@ -1057,14 +1057,19 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
     double cellH = (double)g_cell_pt_h;
 
     if (g_popup_active) {
-        if (g_popup_mouse_tracking && g_popup_mouse_sgr) {
+        uint64_t popupModeSnapshot =
+            __atomic_load_n(&g_popup_mouse_mode_snapshot, __ATOMIC_ACQUIRE);
+        int popupMouseTracking =
+            attyx_mouse_mode_snapshot_tracking(popupModeSnapshot);
+        int popupMouseSgr = attyx_mouse_mode_snapshot_sgr(popupModeSnapshot);
+        if (popupMouseTracking && popupMouseSgr) {
             int col, row;
             mouseCell0(event, self, &col, &row);
             int pc, pr;
             int routed = popupHitTest(col, row, &pc, &pr);
             int ticks = attyx_wheel_ticks_routed(
                 &_popupScrollState, dy, precise, cellH,
-                attyx_input_route_id(1), 0, routed);
+                attyx_input_route_id(1), popupModeSnapshot, routed);
             if (ticks == 0) return;
             int btn = (ticks > 0 ? 64 : 65) | mouseModifiers(event.modifierFlags);
             int n = ticks > 0 ? ticks : -ticks;
@@ -1072,13 +1077,14 @@ static void findWordBounds(int row, int col, int cols, int *outStart, int *outEn
         }
         return;
     }
-    uint64_t modeGen = __atomic_load_n(&g_mouse_mode_gen, __ATOMIC_ACQUIRE);
-    int mouseTracking = __atomic_load_n(&g_mouse_tracking, __ATOMIC_RELAXED);
-    int mouseSgr = __atomic_load_n(&g_mouse_sgr, __ATOMIC_RELAXED);
+    uint64_t modeSnapshot =
+        __atomic_load_n(&g_mouse_mode_snapshot, __ATOMIC_ACQUIRE);
+    int mouseTracking = attyx_mouse_mode_snapshot_tracking(modeSnapshot);
+    int mouseSgr = attyx_mouse_mode_snapshot_sgr(modeSnapshot);
     if (mouseTracking && mouseSgr) {
         int ticks = attyx_wheel_ticks_routed(
             &_sgrScrollState, dy, precise, cellH,
-            attyx_input_route_id(0), modeGen, 1);
+            attyx_input_route_id(0), modeSnapshot, 1);
         if (ticks == 0) return;
         int col, row;
         mouseCell(event, self, &col, &row);
