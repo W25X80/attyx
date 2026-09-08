@@ -10,6 +10,7 @@
 
 #include "bridge.h"
 #include "resize_req.h"
+#include "glyph_cache_policy.h"
 
 // ---------------------------------------------------------------------------
 // Shared state (written by Zig PTY thread, read by renderer on main thread)
@@ -84,20 +85,9 @@ typedef struct __attribute__((packed)) {
 // GlyphCache
 // ---------------------------------------------------------------------------
 
-#define GLYPH_CACHE_CAP  4096
-// Bit 30 of the slot value flags a 2-cell-wide glyph (advance > 1.3×cell).
-// Bit 31 is reserved for the "not found" sentinel (-1 = all bits set).
-// Bit 29 flags a color emoji glyph stored in color_texture (BGRA8), not texture (R8).
-#define GLYPH_WIDE_BIT   (1 << 30)
-#define GLYPH_COLOR_BIT  (1 << 29)
 // Style bits encoded in cache keys (bits 21-22 of the codepoint key).
 #define GLYPH_BOLD_BIT   (1 << 21)
 #define GLYPH_ITALIC_BIT (1 << 22)
-
-typedef struct {
-    uint32_t codepoint;
-    int slot;
-} GlyphEntry;
 
 typedef struct {
     id<MTLTexture> texture;        // R8Unorm  — grayscale glyphs
@@ -115,11 +105,17 @@ typedef struct {
     int            atlas_cols;
     int            atlas_w;
     int            atlas_h;
+    int            atlas_rows;
+    int            max_atlas_rows;
     int            next_slot;
     int            max_slots;
+    int            fallback_slot;
+    bool           storage_valid;
+    bool           capacity_warning_emitted;
+    GlyphCacheFailureLatch failure_latch;
     id<MTLDevice>  device;
 
-    GlyphEntry     map[GLYPH_CACHE_CAP];
+    GlyphMap       map;
 } GlyphCache;
 
 // ---------------------------------------------------------------------------
@@ -127,9 +123,16 @@ typedef struct {
 // ---------------------------------------------------------------------------
 
 GlyphCache createGlyphCache(id<MTLDevice> device, CGFloat scale);
+bool glyphCacheInitStorage(GlyphCache* gc);
+void destroyGlyphCache(GlyphCache* gc);
 int  glyphCacheLookup(GlyphCache* gc, uint32_t cp);
-void glyphCacheInsert(GlyphCache* gc, uint32_t cp, int slot);
-void glyphCacheGrow(GlyphCache* gc);
+bool glyphCachePrepareInsert(GlyphCache* gc, uint32_t cp);
+bool glyphCacheInsert(GlyphCache* gc, uint32_t cp, int slot);
+bool glyphCacheReserveSlots(GlyphCache* gc, int slots);
+bool glyphCacheEnsureColorTexture(GlyphCache* gc);
+bool glyphCacheCanRasterize(const GlyphCache* gc);
+void glyphCacheMarkRasterizationFailure(GlyphCache* gc);
+int  glyphCacheFallbackSlot(const GlyphCache* gc);
 int  glyphCacheRasterize(GlyphCache* gc, uint32_t cp);
 uint32_t combiningKey(uint32_t base, uint32_t c1, uint32_t c2);
 int  glyphCacheRasterizeCombined(GlyphCache* gc, uint32_t base, uint32_t c1, uint32_t c2);
@@ -161,7 +164,7 @@ int emitRect(Vertex* v, int i, float x, float y, float w, float h,
              float r, float g, float b, float a);
 int emitGlyph(Vertex* v, int i, GlyphCache* gc, uint32_t cp,
               float x, float y, float gw, float gh,
-              float r, float g, float b);
+              float r, float g, float b, bool* color);
 int emitString(Vertex* v, int i, GlyphCache* gc,
                const char* str, int len, float x, float y,
                float gw, float gh, float r, float g, float b);

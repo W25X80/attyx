@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
     // Pure computation — no platform dependencies.
     mod.addCSourceFile(.{ .file = b.path("src/vendor/stb_image_impl.c"), .flags = &.{} });
     mod.addCSourceFile(.{ .file = b.path("src/vendor/jebp_impl.c"), .flags = &.{} });
+    mod.addCSourceFile(.{ .file = b.path("src/app/glyph_cache_policy.c"), .flags = &.{} });
     mod.addIncludePath(b.path("src/vendor"));
     mod.addIncludePath(b.path("src/app"));
     mod.linkSystemLibrary("c", .{});
@@ -136,6 +137,7 @@ pub fn build(b: *std.Build) void {
         const macos_flags = &.{"-fobjc-arc"};
         exe.addCSourceFile(.{ .file = b.path("src/app/platform_macos.m"),  .flags = macos_flags });
         exe.addCSourceFile(.{ .file = b.path("src/app/macos_font.m"),      .flags = macos_flags });
+        exe.addCSourceFile(.{ .file = b.path("src/app/macos_glyph_cache.m"), .flags = macos_flags });
         exe.addCSourceFile(.{ .file = b.path("src/app/macos_glyph.m"),     .flags = macos_flags });
         exe.addCSourceFile(.{ .file = b.path("src/app/macos_boxdraw.m"),   .flags = macos_flags });
         exe.addCSourceFile(.{ .file = b.path("src/app/macos_renderer.m"),       .flags = macos_flags });
@@ -352,6 +354,7 @@ pub fn build(b: *std.Build) void {
         });
         app.addCSourceFile(.{ .file = b.path("src/app/platform_macos.m"),  .flags = app_macos_flags });
         app.addCSourceFile(.{ .file = b.path("src/app/macos_font.m"),      .flags = app_macos_flags });
+        app.addCSourceFile(.{ .file = b.path("src/app/macos_glyph_cache.m"), .flags = app_macos_flags });
         app.addCSourceFile(.{ .file = b.path("src/app/macos_glyph.m"),     .flags = app_macos_flags });
         app.addCSourceFile(.{ .file = b.path("src/app/macos_boxdraw.m"),   .flags = app_macos_flags });
         app.addCSourceFile(.{ .file = b.path("src/app/macos_renderer.m"),       .flags = app_macos_flags });

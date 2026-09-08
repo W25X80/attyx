@@ -195,7 +195,6 @@ static int emitRectV(Vertex* v, int i, float x, float y, float w, float h,
         float offY = baseOffY + g_grid_top_offset * gh;
         float viewport[2] = { dW, dH };
 
-        float atlasW = (float)_glyphCache.atlas_w;
         float glyphW = _glyphCache.glyph_w;
         float glyphH = _glyphCache.glyph_h;
         int atlasCols = _glyphCache.atlas_cols;
@@ -502,18 +501,17 @@ static int emitRectV(Vertex* v, int i, float x, float y, float w, float h,
                         int ligaStyle = ((cell->flags & 0x01) ? 1 : 0)
                                       | ((cell->flags & 0x10) ? 2 : 0);
                         const LigaResult* lr = shapeLigatureRun(&_glyphCache, cps, runLen, ligaStyle);
-                        atlasW = (float)_glyphCache.atlas_w;
                         if (lr && lr->hasAlternates) {
                             for (int k = 0; k < runLen; k++) {
                                 int sSlot = lr->slots[k];
                                 if (sSlot < 0) continue;
-                                int sac = sSlot % atlasCols;
-                                int sar = sSlot / atlasCols;
-                                float atlasH = (float)_glyphCache.atlas_h;
-                                float su0 = sac       * glyphW / atlasW;
-                                float sv0 = sar       * glyphH / atlasH;
-                                float su1 = (sac + 1) * glyphW / atlasW;
-                                float sv1 = (sar + 1) * glyphH / atlasH;
+                                GlyphAtlasTexelRect rect = glyphAtlasTexelRect(
+                                    sSlot, atlasCols, (int)glyphW,
+                                    (int)glyphH, 1);
+                                float su0 = rect.x0;
+                                float sv0 = rect.y0;
+                                float su1 = rect.x1;
+                                float sv1 = rect.y1;
                                 float lx0 = offX + (col + k) * gw;
                                 float ly0 = offY + row * gh;
                                 float lx1 = lx0 + gw;
@@ -543,7 +541,6 @@ static int emitRectV(Vertex* v, int i, float x, float y, float w, float h,
                 // --- Normal per-cell rendering ---
                 float x0 = offX + col * gw;
                 float y0 = offY + row * gh;
-                float x1 = x0 + gw;
                 float y1 = y0 + gh;
 
                 uint32_t key = ch;
@@ -558,28 +555,27 @@ static int emitRectV(Vertex* v, int i, float x, float y, float w, float h,
                     rawSlot = hasCombining
                         ? glyphCacheRasterizeCombined(&_glyphCache, ch, cell->combining[0], cell->combining[1])
                         : glyphCacheRasterize(&_glyphCache, key);
-                    atlasW = (float)_glyphCache.atlas_w;
                 }
 
-                // Extract color flag (bit 29), wide flag (bit 30), and actual atlas slot index
-                int isColor = (rawSlot & GLYPH_COLOR_BIT) ? 1 : 0;
-                int wide    = (rawSlot & GLYPH_WIDE_BIT)  ? 1 : 0;
-                int slot    = rawSlot & ~(GLYPH_WIDE_BIT | GLYPH_COLOR_BIT);
+                GlyphAtlasSlot slot;
+                if (!glyphAtlasDecodeSlot(rawSlot, &slot)) {
+                    i++;
+                    continue;
+                }
 
-                int ac = slot % atlasCols;
-                int ar = slot / atlasCols;
-                float atlasH = (float)_glyphCache.atlas_h;
-
-                float au0 = ac             * glyphW / atlasW;
-                float av0 = ar             * glyphH / atlasH;
-                float au1 = (ac + 1 + wide)* glyphW / atlasW; // 2 cols wide for wide glyphs
-                float av1 = (ar + 1)       * glyphH / atlasH;
+                GlyphAtlasTexelRect rect = glyphAtlasTexelRect(
+                    slot.index, atlasCols, (int)glyphW, (int)glyphH,
+                    slot.width);
+                float au0 = rect.x0;
+                float av0 = rect.y0;
+                float au1 = rect.x1;
+                float av1 = rect.y1;
 
                 // Wide glyphs extend the quad into the next cell (Ghostty/WezTerm style).
                 // The next cell's content renders on top, covering overflow when non-empty.
-                float x1w = wide ? x0 + 2.0f * gw : x1;
+                float x1w = x0 + slot.width * gw;
 
-                if (isColor) {
+                if (slot.color) {
                     // Color emoji: vertex color = white, alpha = window opacity
                     float wa = g_background_opacity < 1.0f ? g_background_opacity : 1.0f;
                     _colorVerts[ci+0] = (Vertex){ x0,  y0, au0,av0, 1,1,1,wa };
@@ -845,82 +841,116 @@ static int emitRectV(Vertex* v, int i, float x, float y, float w, float h,
                     preCPs[preCharCount++] = cp;
                 }
 
-                int preCells = preCharCount;
-                if (pCol + preCells > cols) preCells = cols - pCol;
+                int imeGlyphs = 0;
+                int imeColorGlyphs = 0;
+                int usedCells = 0;
+                int availableCells = cols - pCol;
+                Vertex imeTextVerts[128 * 6];
+                Vertex imeColorVerts[128 * 6];
+                for (int i = 0; i < preCharCount; i++) {
+                    uint32_t cp = preCPs[i];
+                    GlyphAtlasSlot slot = {
+                        .index = glyphCacheFallbackSlot(&_glyphCache),
+                        .width = 1,
+                        .color = false,
+                    };
+                    bool drawGlyph = cp > 32;
+                    if (drawGlyph) {
+                        int encoded = glyphCacheLookup(&_glyphCache, cp);
+                        if (encoded < 0) {
+                            encoded = glyphCacheRasterize(&_glyphCache, cp);
+                        }
+                        if (!glyphAtlasDecodeSlot(encoded, &slot)) {
+                            drawGlyph = false;
+                        }
+                    }
 
-                Vertex imeVerts[128 * 6 + 6];
-                int iv = 0;
+                    int nextCells = usedCells;
+                    if (!glyphAtlasAdvanceCells(
+                            usedCells, slot.width, availableCells,
+                            &nextCells)) break;
 
-                for (int i = 0; i < preCells; i++) {
-                    float x0 = offX + (pCol + i) * gw;
+                    if (!drawGlyph) {
+                        usedCells = nextCells;
+                        continue;
+                    }
+
+                    float x0 = offX + (pCol + usedCells) * gw;
                     float y0 = offY + pRow * gh;
-                    float x1 = x0 + gw;
                     float y1 = y0 + gh;
-                    float br = 0.20f, bg = 0.20f, bb = 0.30f;
-                    imeVerts[iv++] = (Vertex){ x0,y0, 0,0, br,bg,bb,1 };
-                    imeVerts[iv++] = (Vertex){ x1,y0, 0,0, br,bg,bb,1 };
-                    imeVerts[iv++] = (Vertex){ x0,y1, 0,0, br,bg,bb,1 };
-                    imeVerts[iv++] = (Vertex){ x1,y0, 0,0, br,bg,bb,1 };
-                    imeVerts[iv++] = (Vertex){ x1,y1, 0,0, br,bg,bb,1 };
-                    imeVerts[iv++] = (Vertex){ x0,y1, 0,0, br,bg,bb,1 };
+
+                    GlyphAtlasTexelRect rect = glyphAtlasTexelRect(
+                        slot.index, _glyphCache.atlas_cols, (int)glyphW,
+                        (int)glyphH, slot.width);
+                    float au0 = rect.x0;
+                    float av0 = rect.y0;
+                    float au1 = rect.x1;
+                    float av1 = rect.y1;
+                    float x1 = x0 + slot.width * gw;
+
+                    float fr = slot.color ? 1.0f : 0.95f;
+                    float fg = slot.color ? 1.0f : 0.95f;
+                    float fb = slot.color ? 1.0f : 0.95f;
+                    Vertex* vertices = slot.color
+                        ? imeColorVerts : imeTextVerts;
+                    int* vertexCount = slot.color
+                        ? &imeColorGlyphs : &imeGlyphs;
+                    int index = *vertexCount;
+                    vertices[index++] = (Vertex){ x0,y0, au0,av0, fr,fg,fb,1 };
+                    vertices[index++] = (Vertex){ x1,y0, au1,av0, fr,fg,fb,1 };
+                    vertices[index++] = (Vertex){ x0,y1, au0,av1, fr,fg,fb,1 };
+                    vertices[index++] = (Vertex){ x1,y0, au1,av0, fr,fg,fb,1 };
+                    vertices[index++] = (Vertex){ x1,y1, au1,av1, fr,fg,fb,1 };
+                    vertices[index++] = (Vertex){ x0,y1, au0,av1, fr,fg,fb,1 };
+                    *vertexCount = index;
+                    usedCells = nextCells;
                 }
 
-                float ulH = 2.0f;
-                float ulY0 = offY + pRow * gh + gh - ulH;
-                float ulY1 = offY + pRow * gh + gh;
-                float ulX0 = offX + pCol * gw;
-                float ulX1 = offX + (pCol + preCells) * gw;
-                imeVerts[iv++] = (Vertex){ ulX0,ulY0, 0,0, 0.9f,0.9f,0.3f,1 };
-                imeVerts[iv++] = (Vertex){ ulX1,ulY0, 0,0, 0.9f,0.9f,0.3f,1 };
-                imeVerts[iv++] = (Vertex){ ulX0,ulY1, 0,0, 0.9f,0.9f,0.3f,1 };
-                imeVerts[iv++] = (Vertex){ ulX1,ulY0, 0,0, 0.9f,0.9f,0.3f,1 };
-                imeVerts[iv++] = (Vertex){ ulX1,ulY1, 0,0, 0.9f,0.9f,0.3f,1 };
-                imeVerts[iv++] = (Vertex){ ulX0,ulY1, 0,0, 0.9f,0.9f,0.3f,1 };
-
-                [enc setRenderPipelineState:self.bgPipeline];
-                [enc setVertexBytes:imeVerts length:sizeof(Vertex) * iv atIndex:0];
-                [enc setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
-                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
-                        vertexCount:iv];
-
-                int imeGlyphs = 0;
-                Vertex imeTextVerts[128 * 6];
-                for (int i = 0; i < preCells; i++) {
-                    uint32_t cp = preCPs[i];
-                    if (cp <= 32) continue;
-                    float x0 = offX + (pCol + i) * gw;
-                    float y0 = offY + pRow * gh;
-                    float x1 = x0 + gw;
-                    float y1 = y0 + gh;
-
-                    int slot = glyphCacheLookup(&_glyphCache, cp);
-                    if (slot < 0) slot = glyphCacheRasterize(&_glyphCache, cp);
-
-                    int ac = slot % _glyphCache.atlas_cols;
-                    int ar = slot / _glyphCache.atlas_cols;
-                    float aW = (float)_glyphCache.atlas_w;
-                    float aH = (float)_glyphCache.atlas_h;
-                    float au0 = ac       * glyphW / aW;
-                    float av0 = ar       * glyphH / aH;
-                    float au1 = (ac + 1) * glyphW / aW;
-                    float av1 = (ar + 1) * glyphH / aH;
-
-                    float fr = 0.95f, fg = 0.95f, fb = 0.95f;
-                    imeTextVerts[imeGlyphs++] = (Vertex){ x0,y0, au0,av0, fr,fg,fb,1 };
-                    imeTextVerts[imeGlyphs++] = (Vertex){ x1,y0, au1,av0, fr,fg,fb,1 };
-                    imeTextVerts[imeGlyphs++] = (Vertex){ x0,y1, au0,av1, fr,fg,fb,1 };
-                    imeTextVerts[imeGlyphs++] = (Vertex){ x1,y0, au1,av0, fr,fg,fb,1 };
-                    imeTextVerts[imeGlyphs++] = (Vertex){ x1,y1, au1,av1, fr,fg,fb,1 };
-                    imeTextVerts[imeGlyphs++] = (Vertex){ x0,y1, au0,av1, fr,fg,fb,1 };
+                if (usedCells > 0) {
+                    Vertex imeBackgroundVerts[12];
+                    float x = offX + pCol * gw;
+                    float y = offY + pRow * gh;
+                    int count = emitRect(
+                        imeBackgroundVerts, 0, x, y, usedCells * gw, gh,
+                        0.20f, 0.20f, 0.30f, 1.0f);
+                    count = emitRect(
+                        imeBackgroundVerts, count, x, y + gh - 2.0f,
+                        usedCells * gw, 2.0f, 0.9f, 0.9f, 0.3f, 1.0f);
+                    [enc setRenderPipelineState:self.bgPipeline];
+                    [enc setVertexBytes:imeBackgroundVerts
+                                 length:sizeof(Vertex) * count atIndex:0];
+                    [enc setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
+                    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                            vertexCount:count];
                 }
 
                 if (imeGlyphs > 0) {
-                    [enc setRenderPipelineState:self.textPipeline];
-                    [enc setVertexBytes:imeTextVerts length:sizeof(Vertex) * imeGlyphs atIndex:0];
-                    [enc setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
-                    [enc setFragmentTexture:_glyphCache.texture atIndex:0];
-                    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
-                            vertexCount:imeGlyphs];
+                    id<MTLBuffer> textBuffer = [self.device
+                        newBufferWithBytes:imeTextVerts
+                                    length:sizeof(Vertex) * imeGlyphs
+                                   options:MTLResourceStorageModeShared];
+                    if (textBuffer) {
+                        [enc setRenderPipelineState:self.textPipeline];
+                        [enc setVertexBuffer:textBuffer offset:0 atIndex:0];
+                        [enc setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
+                        [enc setFragmentTexture:_glyphCache.texture atIndex:0];
+                        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                                vertexCount:imeGlyphs];
+                    }
+                }
+                if (imeColorGlyphs > 0 && _glyphCache.color_texture) {
+                    id<MTLBuffer> colorBuffer = [self.device
+                        newBufferWithBytes:imeColorVerts
+                                    length:sizeof(Vertex) * imeColorGlyphs
+                                   options:MTLResourceStorageModeShared];
+                    if (colorBuffer) {
+                        [enc setRenderPipelineState:self.colorPipeline];
+                        [enc setVertexBuffer:colorBuffer offset:0 atIndex:0];
+                        [enc setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
+                        [enc setFragmentTexture:_glyphCache.color_texture atIndex:0];
+                        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                                vertexCount:imeColorGlyphs];
+                    }
                 }
             }
         }

@@ -21,4 +21,5 @@ test {
     _ = @import("tests/glfw_char_gate.zig");
     _ = @import("tests/resize_scale_coherence.zig");
     _ = @import("../app/atomic_bridge_contract_test.zig");
+    _ = @import("tests/glyph_cache_policy.zig");
 }

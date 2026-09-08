@@ -29,7 +29,8 @@
     // which has a hard 4KB limit — overlays can easily exceed that).
     Vertex bgVerts[OVERLAY_MAX_BG_VERTS];
     Vertex textVerts[OVERLAY_MAX_TEXT_VERTS];
-    int bi = 0, ti = 0;
+    Vertex colorVerts[OVERLAY_MAX_TEXT_VERTS];
+    int bi = 0, ti = 0, colorCount = 0;
 
     for (int layer = 0; layer < count; layer++) {
         AttyxOverlayDesc desc = g_overlay_descs[layer];
@@ -58,6 +59,18 @@
                 [enc setFragmentTexture:_glyphCache.texture atIndex:0];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:ti];
                 ti = 0;
+            }
+            if (colorCount > 0 && _glyphCache.color_texture) {
+                id<MTLBuffer> colorBuf = [self.device newBufferWithBytes:colorVerts
+                                                                 length:sizeof(Vertex) * colorCount
+                                                                options:MTLResourceStorageModeShared];
+                [enc setRenderPipelineState:self.colorPipeline];
+                [enc setVertexBuffer:colorBuf offset:0 atIndex:0];
+                [enc setVertexBytes:viewport length:sizeof(float) * 2 atIndex:1];
+                [enc setFragmentTexture:_glyphCache.color_texture atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                        vertexCount:colorCount];
+                colorCount = 0;
             }
             float ba = desc.backdrop_alpha / 255.0f;
             Vertex dimVerts[6];
@@ -113,7 +126,7 @@
             }
 
             // Text glyph (skip spaces and control chars)
-            if (cell.character > 32 && ti + 6 <= OVERLAY_MAX_TEXT_VERTS) {
+            if (cell.character > 32) {
                 uint32_t ch = cell.character;
                 bool hasCombining = (cell.combining[0] != 0);
                 uint32_t key = hasCombining ? combiningKey(ch, cell.combining[0], cell.combining[1]) : ch;
@@ -125,28 +138,34 @@
                         : glyphCacheRasterize(&_glyphCache, ch);
                 }
 
-                int wide = (rawSlot & GLYPH_WIDE_BIT) ? 1 : 0;
-                int slot = rawSlot & ~(GLYPH_WIDE_BIT | GLYPH_COLOR_BIT);
+                GlyphAtlasSlot slot;
+                if (!glyphAtlasDecodeSlot(rawSlot, &slot)) continue;
                 float glyphW = _glyphCache.glyph_w;
                 float glyphH = _glyphCache.glyph_h;
-                float atlasW = (float)_glyphCache.atlas_w;
-                float atlasH = (float)_glyphCache.atlas_h;
                 int atlasCols = _glyphCache.atlas_cols;
-                int ac = slot % atlasCols;
-                int ar = slot / atlasCols;
-                float u0 = ac * glyphW / atlasW;
-                float v0 = ar * glyphH / atlasH;
-                float u1 = (ac + 1 + wide) * glyphW / atlasW;
-                float v1 = (ar + 1) * glyphH / atlasH;
-                float drawW = wide ? 2.0f * gw : gw;
-
-                textVerts[ti+0] = (Vertex){ x,        y,    u0,v0, fgR,fgG,fgB,1 };
-                textVerts[ti+1] = (Vertex){ x+drawW,  y,    u1,v0, fgR,fgG,fgB,1 };
-                textVerts[ti+2] = (Vertex){ x,        y+gh, u0,v1, fgR,fgG,fgB,1 };
-                textVerts[ti+3] = (Vertex){ x+drawW,  y,    u1,v0, fgR,fgG,fgB,1 };
-                textVerts[ti+4] = (Vertex){ x+drawW,  y+gh, u1,v1, fgR,fgG,fgB,1 };
-                textVerts[ti+5] = (Vertex){ x,        y+gh, u0,v1, fgR,fgG,fgB,1 };
-                ti += 6;
+                GlyphAtlasTexelRect rect = glyphAtlasTexelRect(
+                    slot.index, atlasCols, (int)glyphW, (int)glyphH,
+                    slot.width);
+                float u0 = rect.x0;
+                float v0 = rect.y0;
+                float u1 = rect.x1;
+                float v1 = rect.y1;
+                float drawW = slot.width * gw;
+                Vertex* vertices = slot.color ? colorVerts : textVerts;
+                int* vertexCount = slot.color ? &colorCount : &ti;
+                if (*vertexCount + 6 <= OVERLAY_MAX_TEXT_VERTS) {
+                    float r = slot.color ? 1.0f : fgR;
+                    float g = slot.color ? 1.0f : fgG;
+                    float b = slot.color ? 1.0f : fgB;
+                    int index = *vertexCount;
+                    vertices[index++] = (Vertex){ x,        y,    u0,v0, r,g,b,1 };
+                    vertices[index++] = (Vertex){ x+drawW,  y,    u1,v0, r,g,b,1 };
+                    vertices[index++] = (Vertex){ x,        y+gh, u0,v1, r,g,b,1 };
+                    vertices[index++] = (Vertex){ x+drawW,  y,    u1,v0, r,g,b,1 };
+                    vertices[index++] = (Vertex){ x+drawW,  y+gh, u1,v1, r,g,b,1 };
+                    vertices[index++] = (Vertex){ x,        y+gh, u0,v1, r,g,b,1 };
+                    *vertexCount = index;
+                }
             }
 
             // Underline decoration (1px line at bottom of cell)
@@ -186,6 +205,17 @@
         [enc setVertexBytes:viewport length:sizeof(float) * 2 atIndex:1];
         [enc setFragmentTexture:_glyphCache.texture atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:ti];
+    }
+    if (colorCount > 0 && _glyphCache.color_texture) {
+        id<MTLBuffer> colorBuf = [self.device newBufferWithBytes:colorVerts
+                                                         length:sizeof(Vertex) * colorCount
+                                                        options:MTLResourceStorageModeShared];
+        [enc setRenderPipelineState:self.colorPipeline];
+        [enc setVertexBuffer:colorBuf offset:0 atIndex:0];
+        [enc setVertexBytes:viewport length:sizeof(float) * 2 atIndex:1];
+        [enc setFragmentTexture:_glyphCache.color_texture atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                vertexCount:colorCount];
     }
 }
 

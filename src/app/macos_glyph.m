@@ -18,76 +18,9 @@ extern CTFontRef createFuzzyMatchFont(CFStringRef reqName, CGFloat fontSize);
 /// property is W (Wide) or F (Fullwidth) — i.e. it occupies 2 terminal cells.
 /// Characters with EAW = N / Na / H must return false even if the font
 /// happens to draw them wider than one cell (e.g. regional indicators).
-void glyphCacheInsert(GlyphCache* gc, uint32_t cp, int slot) {
-    uint32_t idx = (cp * 2654435761u) % GLYPH_CACHE_CAP;
-    for (int probe = 0; probe < GLYPH_CACHE_CAP; probe++) {
-        uint32_t i = (idx + probe) % GLYPH_CACHE_CAP;
-        if (gc->map[i].slot < 0 || gc->map[i].codepoint == cp) {
-            gc->map[i].codepoint = cp;
-            gc->map[i].slot = slot;
-            return;
-        }
-    }
-}
-
-int glyphCacheLookup(GlyphCache* gc, uint32_t cp) {
-    uint32_t idx = (cp * 2654435761u) % GLYPH_CACHE_CAP;
-    for (int probe = 0; probe < GLYPH_CACHE_CAP; probe++) {
-        uint32_t i = (idx + probe) % GLYPH_CACHE_CAP;
-        if (gc->map[i].slot < 0) return -1;
-        if (gc->map[i].codepoint == cp) return gc->map[i].slot;
-    }
-    return -1;
-}
-
-void glyphCacheGrow(GlyphCache* gc) {
-    int oldH = gc->atlas_h;
-    int newRows = (gc->max_slots / gc->atlas_cols) * 2;
-    int newH = (int)(gc->glyph_h * newRows);
-    int newMaxSlots = gc->atlas_cols * newRows;
-
-    // Grow grayscale atlas
-    MTLTextureDescriptor* desc =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-                                                           width:gc->atlas_w
-                                                          height:newH
-                                                       mipmapped:NO];
-    id<MTLTexture> newTex = [gc->device newTextureWithDescriptor:desc];
-
-    uint8_t* buf = (uint8_t*)calloc(gc->atlas_w * newH, 1);
-    [gc->texture getBytes:buf
-              bytesPerRow:gc->atlas_w
-               fromRegion:MTLRegionMake2D(0, 0, gc->atlas_w, oldH)
-              mipmapLevel:0];
-    [newTex replaceRegion:MTLRegionMake2D(0, 0, gc->atlas_w, newH)
-              mipmapLevel:0
-                withBytes:buf
-              bytesPerRow:gc->atlas_w];
-    free(buf);
-    gc->texture = newTex;
-
-    // Grow color atlas only if it has been created (lazy allocation).
-    if (gc->color_texture) {
-        uint8_t* cbuf = (uint8_t*)calloc(gc->atlas_w * newH * 4, 1);
-        [gc->color_texture getBytes:cbuf
-                        bytesPerRow:gc->atlas_w * 4
-                         fromRegion:MTLRegionMake2D(0, 0, gc->atlas_w, oldH)
-                        mipmapLevel:0];
-        MTLTextureDescriptor* cd = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                         width:gc->atlas_w height:newH mipmapped:NO];
-        id<MTLTexture> newColorTex = [gc->device newTextureWithDescriptor:cd];
-        [newColorTex replaceRegion:MTLRegionMake2D(0, 0, gc->atlas_w, newH)
-                       mipmapLevel:0 withBytes:cbuf bytesPerRow:gc->atlas_w * 4];
-        free(cbuf);
-        gc->color_texture = newColorTex;
-    }
-
-    gc->atlas_h = newH;
-    gc->max_slots = newMaxSlots;
-}
-
 int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
+    if (!glyphCacheCanRasterize(gc)) return glyphCacheFallbackSlot(gc);
+
     int gw = (int)gc->glyph_w;
     int gh = (int)gc->glyph_h;
 
@@ -173,19 +106,19 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
     }
     int renderW = wide ? 2 * gw : gw;
 
-    // 4. Allocate atlas slot(s)
-    int slot;
-    if (wide) {
-        // Ensure wide glyph doesn't split across atlas rows
-        if (gc->next_slot % gc->atlas_cols == gc->atlas_cols - 1)
-            gc->next_slot++;
-        while (gc->next_slot + 1 >= gc->max_slots) glyphCacheGrow(gc);
-        slot = gc->next_slot;
-        gc->next_slot += 2;
-    } else {
-        if (gc->next_slot >= gc->max_slots) glyphCacheGrow(gc);
-        slot = gc->next_slot++;
+    int glyphSlots = wide ? 2 : 1;
+    int rowPadding = wide
+        ? glyphAtlasWidePadding(gc->next_slot, gc->atlas_cols)
+        : 0;
+    if (!glyphCachePrepareInsert(gc, cp)
+            || !glyphCacheReserveSlots(gc, rowPadding + glyphSlots)) {
+        if (drawFont != gc->font && drawFont != gc->font_bold
+                && drawFont != gc->font_italic
+                && drawFont != gc->font_bold_italic)
+            CFRelease(drawFont);
+        return glyphCacheFallbackSlot(gc);
     }
+    int slot = gc->next_slot + rowPadding;
     int ac = slot % gc->atlas_cols;
     int ar = slot / gc->atlas_cols;
 
@@ -195,7 +128,8 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
         if (drawFont != gc->font && drawFont != gc->font_bold
                 && drawFont != gc->font_italic && drawFont != gc->font_bold_italic)
                 CFRelease(drawFont);
-        glyphCacheInsert(gc, cp, slot);
+        if (!glyphCacheInsert(gc, cp, slot)) return glyphCacheFallbackSlot(gc);
+        gc->next_slot = slot + glyphSlots;
         return slot;
     }
 
@@ -207,20 +141,44 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
         CFRelease(familyName);
 
         if (isColorEmoji) {
-            // Lazy-create color atlas on first color glyph.
-            if (!gc->color_texture) {
-                MTLTextureDescriptor* cd = [MTLTextureDescriptor
-                    texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                 width:gc->atlas_w height:gc->atlas_h
-                                             mipmapped:NO];
-                gc->color_texture = [gc->device newTextureWithDescriptor:cd];
+            size_t pixelBytes = 0;
+            if (!glyphCacheEnsureColorTexture(gc)) {
+                int fallback = glyphCacheFallbackSlot(gc);
+                glyphCacheInsert(gc, cp, fallback);
+                if (drawFont != gc->font && drawFont != gc->font_bold
+                        && drawFont != gc->font_italic
+                        && drawFont != gc->font_bold_italic)
+                    CFRelease(drawFont);
+                return fallback;
+            }
+            if (!glyphAtlasPixelBytes(renderW, gh, 4, &pixelBytes)) {
+                glyphCacheMarkRasterizationFailure(gc);
+                if (drawFont != gc->font && drawFont != gc->font_bold
+                        && drawFont != gc->font_italic
+                        && drawFont != gc->font_bold_italic)
+                    CFRelease(drawFont);
+                return glyphCacheFallbackSlot(gc);
             }
 
             CGColorSpaceRef rgbCS = CGColorSpaceCreateDeviceRGB();
-            uint8_t* pixels = (uint8_t*)calloc(renderW * gh * 4, 1);
-            CGContextRef ctx = CGBitmapContextCreate(pixels, renderW, gh, 8, renderW * 4,
-                rgbCS, kCGBitmapByteOrder32Host | kCGImageAlphaPremultipliedFirst);
-            CGColorSpaceRelease(rgbCS);
+            uint8_t* pixels = calloc(pixelBytes, 1);
+            CGContextRef ctx = NULL;
+            if (pixels && rgbCS) {
+                ctx = CGBitmapContextCreate(
+                    pixels, renderW, gh, 8, renderW * 4, rgbCS,
+                    kCGBitmapByteOrder32Host | kCGImageAlphaPremultipliedFirst);
+            }
+            if (rgbCS) CGColorSpaceRelease(rgbCS);
+            if (!pixels || !ctx) {
+                if (ctx) CGContextRelease(ctx);
+                free(pixels);
+                glyphCacheMarkRasterizationFailure(gc);
+                if (drawFont != gc->font && drawFont != gc->font_bold
+                        && drawFont != gc->font_italic
+                        && drawFont != gc->font_bold_italic)
+                    CFRelease(drawFont);
+                return glyphCacheFallbackSlot(gc);
+            }
 
             NSString* str = [[NSString alloc] initWithCharacters:utf16 length:utf16Len];
             NSDictionary* attrs = @{(NSString*)kCTFontAttributeName: (__bridge id)drawFont};
@@ -234,25 +192,56 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
             CFRelease(line);
             CGContextRelease(ctx);
 
+            int encoded = (wide ? GLYPH_WIDE_BIT : 0) | GLYPH_COLOR_BIT | slot;
+            if (!glyphCacheInsert(gc, cp, encoded)) {
+                free(pixels);
+                if (drawFont != gc->font && drawFont != gc->font_bold
+                        && drawFont != gc->font_italic
+                        && drawFont != gc->font_bold_italic)
+                    CFRelease(drawFont);
+                return glyphCacheFallbackSlot(gc);
+            }
             [gc->color_texture
                 replaceRegion:MTLRegionMake2D(ac * gw, ar * gh, renderW, gh)
                   mipmapLevel:0 withBytes:pixels bytesPerRow:(NSUInteger)(renderW * 4)];
             free(pixels);
+            gc->next_slot = slot + glyphSlots;
 
             if (drawFont != gc->font && drawFont != gc->font_bold
                 && drawFont != gc->font_italic && drawFont != gc->font_bold_italic)
                 CFRelease(drawFont);
-            int encoded = (wide ? GLYPH_WIDE_BIT : 0) | GLYPH_COLOR_BIT | slot;
-            glyphCacheInsert(gc, cp, encoded);
             return encoded;
         }
     }
 
     // 6. Create bitmap context (renderW × gh)
+    size_t pixelBytes = 0;
+    if (!glyphAtlasPixelBytes(renderW, gh, 1, &pixelBytes)) {
+        glyphCacheMarkRasterizationFailure(gc);
+        if (drawFont != gc->font && drawFont != gc->font_bold
+                && drawFont != gc->font_italic
+                && drawFont != gc->font_bold_italic)
+            CFRelease(drawFont);
+        return glyphCacheFallbackSlot(gc);
+    }
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
-    uint8_t* pixels = (uint8_t*)calloc(renderW * gh, 1);
-    CGContextRef ctx = CGBitmapContextCreate(pixels, renderW, gh, 8, renderW, cs, kCGImageAlphaNone);
-    CGColorSpaceRelease(cs);
+    uint8_t* pixels = calloc(pixelBytes, 1);
+    CGContextRef ctx = NULL;
+    if (pixels && cs) {
+        ctx = CGBitmapContextCreate(pixels, renderW, gh, 8, renderW, cs,
+                                    kCGImageAlphaNone);
+    }
+    if (cs) CGColorSpaceRelease(cs);
+    if (!pixels || !ctx) {
+        if (ctx) CGContextRelease(ctx);
+        free(pixels);
+        glyphCacheMarkRasterizationFailure(gc);
+        if (drawFont != gc->font && drawFont != gc->font_bold
+                && drawFont != gc->font_italic
+                && drawFont != gc->font_bold_italic)
+            CFRelease(drawFont);
+        return glyphCacheFallbackSlot(gc);
+    }
     CGContextSetGrayFillColor(ctx, 1.0, 1.0);
     // Disable LCD subpixel smoothing — it fattens strokes in grayscale contexts.
     CGContextSetShouldSmoothFonts(ctx, NO);
@@ -395,16 +384,18 @@ int glyphCacheRasterize(GlyphCache* gc, uint32_t cp) {
                 && drawFont != gc->font_italic && drawFont != gc->font_bold_italic)
                 CFRelease(drawFont);
 
-    // 8. Upload to atlas
+    int encoded = wide ? (slot | GLYPH_WIDE_BIT) : slot;
+    if (!glyphCacheInsert(gc, cp, encoded)) {
+        free(pixels);
+        return glyphCacheFallbackSlot(gc);
+    }
     [gc->texture replaceRegion:MTLRegionMake2D(ac * gw, ar * gh, renderW, gh)
                    mipmapLevel:0
                      withBytes:pixels
                    bytesPerRow:renderW];
     free(pixels);
+    gc->next_slot = slot + glyphSlots;
 
-    // 9. Insert into map — encode wide flag in bit 30 of the slot value
-    int encoded = wide ? (slot | GLYPH_WIDE_BIT) : slot;
-    glyphCacheInsert(gc, cp, encoded);
     return encoded;
 }
 
@@ -427,8 +418,11 @@ static int cpToUtf16(uint32_t cp, UniChar buf[2]) {
 }
 
 int glyphCacheRasterizeCombined(GlyphCache* gc, uint32_t base, uint32_t c1, uint32_t c2) {
+    if (!glyphCacheCanRasterize(gc)) return glyphCacheFallbackSlot(gc);
+
     int gw = (int)gc->glyph_w;
     int gh = (int)gc->glyph_h;
+    uint32_t key = combiningKey(base, c1, c2);
 
     // 1. Font fallback for the base character (same chain as regular rasterizer)
     UniChar baseUtf16[2];
@@ -481,25 +475,40 @@ int glyphCacheRasterizeCombined(GlyphCache* gc, uint32_t base, uint32_t c1, uint
         }
     }
 
-    // 2. Allocate atlas slot (Thai is never wide)
-    if (gc->next_slot >= gc->max_slots) glyphCacheGrow(gc);
-    int slot = gc->next_slot++;
+    if (!glyphCachePrepareInsert(gc, key) || !glyphCacheReserveSlots(gc, 1)) {
+        if (ownFont) CFRelease(drawFont);
+        return glyphCacheFallbackSlot(gc);
+    }
+    int slot = gc->next_slot;
     int ac = slot % gc->atlas_cols;
     int ar = slot / gc->atlas_cols;
 
     if (!haveGlyph) {
-        // No glyph found — store blank slot
         if (ownFont) CFRelease(drawFont);
-        uint32_t key = combiningKey(base, c1, c2);
-        glyphCacheInsert(gc, key, slot);
+        if (!glyphCacheInsert(gc, key, slot)) return glyphCacheFallbackSlot(gc);
+        gc->next_slot++;
         return slot;
     }
 
-    // 3. Create bitmap context (same setup as regular rasterizer)
-    uint8_t* pixels = (uint8_t*)calloc(gw * gh, 1);
+    size_t pixelBytes = 0;
+    if (!glyphAtlasPixelBytes(gw, gh, 1, &pixelBytes)) {
+        glyphCacheMarkRasterizationFailure(gc);
+        if (ownFont) CFRelease(drawFont);
+        return glyphCacheFallbackSlot(gc);
+    }
+    uint8_t* pixels = calloc(pixelBytes, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
-    CGContextRef ctx = CGBitmapContextCreate(pixels, gw, gh, 8, gw, cs, kCGImageAlphaNone);
-    CGColorSpaceRelease(cs);
+    CGContextRef ctx = NULL;
+    if (pixels && cs)
+        ctx = CGBitmapContextCreate(pixels, gw, gh, 8, gw, cs, kCGImageAlphaNone);
+    if (cs) CGColorSpaceRelease(cs);
+    if (!pixels || !ctx) {
+        if (ctx) CGContextRelease(ctx);
+        free(pixels);
+        glyphCacheMarkRasterizationFailure(gc);
+        if (ownFont) CFRelease(drawFont);
+        return glyphCacheFallbackSlot(gc);
+    }
     CGContextSetGrayFillColor(ctx, 1.0, 1.0);
     CGContextSetShouldSmoothFonts(ctx, NO);
     CGContextSetAllowsFontSmoothing(ctx, NO);
@@ -526,15 +535,17 @@ int glyphCacheRasterizeCombined(GlyphCache* gc, uint32_t base, uint32_t c1, uint
     CGContextRelease(ctx);
     if (ownFont) CFRelease(drawFont);
 
-    // 6. Upload to atlas
+    if (!glyphCacheInsert(gc, key, slot)) {
+        free(pixels);
+        return glyphCacheFallbackSlot(gc);
+    }
     [gc->texture replaceRegion:MTLRegionMake2D(ac * gw, ar * gh, gw, gh)
                    mipmapLevel:0
                      withBytes:pixels
                    bytesPerRow:gw];
     free(pixels);
+    gc->next_slot++;
 
-    uint32_t key = combiningKey(base, c1, c2);
-    glyphCacheInsert(gc, key, slot);
     return slot;
 }
 

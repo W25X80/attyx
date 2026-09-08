@@ -43,7 +43,8 @@
 
         Vertex bgVerts[POPUP_CHUNK * 6];
         Vertex textVerts[POPUP_CHUNK * 6];
-        int bi = 0, ti = 0;
+        Vertex colorVerts[POPUP_CHUNK * 6];
+        int bi = 0, ti = 0, colorCount = 0;
 
         for (int ci = start; ci < end; ci++) {
             int cellRow = ci / desc.width;
@@ -67,12 +68,22 @@
             }
 
             // Text glyph (skip spaces, control chars, and Kitty placeholders)
-            if (cell.character > 32 && cell.character != 0x10EEEE && ti + 6 <= POPUP_CHUNK * 6) {
-                ti = emitGlyph(textVerts, ti, &_glyphCache, cell.character,
-                               x, y, gw, gh,
-                               cell.fg_r / 255.0f,
-                               cell.fg_g / 255.0f,
-                               cell.fg_b / 255.0f);
+            if (cell.character > 32 && cell.character != 0x10EEEE) {
+                Vertex glyphVerts[6];
+                bool color = false;
+                int glyphCount = emitGlyph(
+                    glyphVerts, 0, &_glyphCache, cell.character,
+                    x, y, gw, gh,
+                    cell.fg_r / 255.0f,
+                    cell.fg_g / 255.0f,
+                    cell.fg_b / 255.0f, &color);
+                if (glyphCount == 6) {
+                    Vertex* destination = color ? colorVerts : textVerts;
+                    int* destinationCount = color ? &colorCount : &ti;
+                    memcpy(destination + *destinationCount, glyphVerts,
+                           sizeof(glyphVerts));
+                    *destinationCount += glyphCount;
+                }
             }
         }
 
@@ -97,6 +108,17 @@
             [enc setVertexBytes:viewport length:sizeof(float) * 2 atIndex:1];
             [enc setFragmentTexture:_glyphCache.texture atIndex:0];
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:ti];
+        }
+        if (colorCount > 0 && _glyphCache.color_texture) {
+            id<MTLBuffer> colorBuf = [self.device newBufferWithBytes:colorVerts
+                                                             length:sizeof(Vertex) * colorCount
+                                                            options:MTLResourceStorageModeShared];
+            [enc setRenderPipelineState:self.colorPipeline];
+            [enc setVertexBuffer:colorBuf offset:0 atIndex:0];
+            [enc setVertexBytes:viewport length:sizeof(float) * 2 atIndex:1];
+            [enc setFragmentTexture:_glyphCache.color_texture atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                    vertexCount:colorCount];
         }
     }
 
