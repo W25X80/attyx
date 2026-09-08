@@ -2,7 +2,9 @@
 
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h>
+#include <limits.h>
 #include "macos_internal.h"
+#include "macos_key_identity.h"
 
 // KeyCode enum values (must match src/term/key_encode.zig KeyCode)
 enum {
@@ -17,7 +19,13 @@ enum {
     KC_KP_DECIMAL, KC_KP_DIVIDE, KC_KP_MULTIPLY,
     KC_KP_MINUS, KC_KP_PLUS, KC_KP_ENTER, KC_KP_EQUAL,
     KC_CODEPOINT,
+    KC_LEFT_SHIFT, KC_LEFT_CONTROL, KC_LEFT_ALT, KC_LEFT_SUPER,
+    KC_RIGHT_SHIFT, KC_RIGHT_CONTROL, KC_RIGHT_ALT, KC_RIGHT_SUPER,
 };
+
+_Static_assert(KC_LEFT_SHIFT == ATTYX_KEY_LEFT_SHIFT, "KeyCode values must match Zig");
+_Static_assert(KC_CODEPOINT == ATTYX_KEY_CODEPOINT, "KeyCode values must match Zig");
+_Static_assert(KC_RIGHT_SUPER == ATTYX_KEY_RIGHT_SUPER, "KeyCode values must match Zig");
 
 static uint16_t mapKeyCode(unsigned short kc) {
     switch (kc) {
@@ -77,6 +85,78 @@ static uint8_t buildMods(NSEventModifierFlags flags) {
     return m;
 }
 
+typedef void (*AttyxExtendedKeyHandler)(uint16_t, uint8_t, uint8_t,
+                                        uint32_t, uint32_t, uint32_t,
+                                        const uint8_t*, int);
+
+static uint32_t firstScalar(NSString* text) {
+    NSUInteger length = text.length;
+    if (length == 0) return 0;
+    uint16_t first = [text characterAtIndex:0];
+    uint16_t second = length > 1 ? [text characterAtIndex:1] : 0;
+    return attyx_utf16_first_scalar(first, second, (int)MIN(length, 2));
+}
+
+static uint64_t deviceModifierMask(unsigned short keycode) {
+    switch (keycode) {
+        case kVK_Shift:        return 0x00000002;
+        case kVK_RightShift:   return 0x00000004;
+        case kVK_Control:      return 0x00000001;
+        case kVK_RightControl: return 0x00002000;
+        case kVK_Option:       return 0x00000020;
+        case kVK_RightOption:  return 0x00000040;
+        case kVK_Command:      return 0x00000008;
+        case kVK_RightCommand: return 0x00000010;
+        default:               return 0;
+    }
+}
+
+static BOOL routeKittyAllKey(NSEvent* event, uint8_t eventType) {
+    if (!(g_kitty_kbd_flags & 8)) return NO;
+
+    uint16_t key = mapKeyCode(event.keyCode);
+    uint32_t codepoint = 0;
+    uint32_t shiftedCodepoint = 0;
+    uint32_t baseCodepoint = 0;
+    const uint8_t* textBytes = NULL;
+    int textLength = 0;
+
+    if (key == UINT16_MAX) {
+        key = attyx_macos_modifier_key(event.keyCode);
+    }
+
+    if (key == UINT16_MAX) {
+        key = KC_CODEPOINT;
+        codepoint = firstScalar([event charactersByApplyingModifiers:0]);
+        shiftedCodepoint = firstScalar(
+            [event charactersByApplyingModifiers:NSEventModifierFlagShift]);
+        baseCodepoint = attyx_macos_standard_codepoint(event.keyCode, 0);
+
+        if (codepoint == 0) codepoint = baseCodepoint;
+        if (codepoint == 0) return NO;
+        if (shiftedCodepoint == codepoint) shiftedCodepoint = 0;
+        if (baseCodepoint == codepoint) baseCodepoint = 0;
+
+        if (eventType != 3) {
+            NSString* generatedText = event.characters;
+            const char* utf8 = generatedText.UTF8String;
+            NSUInteger length = [generatedText lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+            if (utf8 && length > 0 && length <= INT_MAX) {
+                textBytes = (const uint8_t*)utf8;
+                textLength = (int)length;
+            }
+        }
+    }
+
+    AttyxExtendedKeyHandler handler = g_popup_active
+        ? attyx_popup_handle_key_ext
+        : attyx_handle_key_ext;
+    handler(key, buildMods(event.modifierFlags), eventType,
+            codepoint, shiftedCodepoint, baseCodepoint,
+            textBytes, textLength);
+    return YES;
+}
+
 // Device-dependent modifier bits distinguishing the two physical Option keys.
 #define ATTYX_LEFT_OPTION_MASK  0x20  // NX_DEVICELALTKEYMASK
 #define ATTYX_RIGHT_OPTION_MASK 0x40  // NX_DEVICELRALTKEYMASK
@@ -128,6 +208,19 @@ static void eventToKeyCombo(NSEvent* event, uint16_t* outKey, uint32_t* outCp) {
     // Only send key release when kitty event_types flag is active (bit 1)
     if (!(g_kitty_kbd_flags & 2)) return;
 
+    if (event.modifierFlags & NSEventModifierFlagCommand) {
+        uint16_t mapped = mapKeyCode(event.keyCode);
+        if (mapped == KC_LEFT || mapped == KC_RIGHT) {
+            uint16_t remapped = mapped == KC_LEFT ? KC_HOME : KC_END;
+            void (*handle_key_fn)(uint16_t, uint8_t, uint8_t, uint32_t) =
+                g_popup_active ? attyx_popup_handle_key : attyx_handle_key;
+            handle_key_fn(remapped, 0, 3, 0);
+        }
+        return;
+    }
+
+    if (routeKittyAllKey(event, 3)) return;
+
     unsigned short kc = event.keyCode;
     uint16_t mapped = mapKeyCode(kc);
     uint8_t mods = buildMods(event.modifierFlags);
@@ -138,12 +231,30 @@ static void eventToKeyCombo(NSEvent* event, uint16_t* outKey, uint32_t* outCp) {
     if (mapped != UINT16_MAX) {
         handle_key_fn(mapped, mods, 3, 0);
     } else {
-        NSString* chars = event.charactersIgnoringModifiers;
-        if (chars.length > 0) {
-            uint32_t cp = [chars characterAtIndex:0];
-            handle_key_fn(KC_CODEPOINT, mods, 3, cp);
-        }
+        uint32_t cp = firstScalar([event charactersByApplyingModifiers:0]);
+        uint32_t shifted = firstScalar(
+            [event charactersByApplyingModifiers:NSEventModifierFlagShift]);
+        uint32_t base = attyx_macos_standard_codepoint(event.keyCode, 0);
+        if (cp == 0) cp = base;
+        if (cp == 0) return;
+        if (shifted == cp) shifted = 0;
+        if (base == cp) base = 0;
+        AttyxExtendedKeyHandler ext_handler = g_popup_active
+            ? attyx_popup_handle_key_ext
+            : attyx_handle_key_ext;
+        ext_handler(KC_CODEPOINT, mods, 3, cp, shifted, base, NULL, 0);
     }
+}
+
+- (void)flagsChanged:(NSEvent *)event {
+    if (!(g_kitty_kbd_flags & 8)) return;
+
+    uint16_t key = attyx_macos_modifier_key(event.keyCode);
+    uint64_t mask = deviceModifierMask(event.keyCode);
+    if (key == UINT16_MAX || mask == 0) return;
+
+    uint8_t eventType = (event.modifierFlags & mask) ? 1 : 3;
+    routeKittyAllKey(event, eventType);
 }
 
 - (void)snapViewportAndClearSelection {
@@ -317,6 +428,8 @@ static void eventToKeyCombo(NSEvent* event, uint16_t* outKey, uint32_t* outCp) {
     uint8_t mods = buildMods(flags);
     uint8_t et = event.isARepeat ? 2 : 1;
 
+    if (routeKittyAllKey(event, et)) return YES;
+
     // Route special keys to popup or main terminal
     void (*handle_key_fn)(uint16_t, uint8_t, uint8_t, uint32_t) =
         g_popup_active ? attyx_popup_handle_key : attyx_handle_key;
@@ -332,10 +445,18 @@ static void eventToKeyCombo(NSEvent* event, uint16_t* outKey, uint32_t* outCp) {
     // composes the layout's character (e.g. Option+ñ → ~) instead of emitting
     // an ESC-prefixed Meta sequence.
     if (ctrl || optionActsAsAlt(flags)) {
-        NSString* chars = event.charactersIgnoringModifiers;
-        if (chars.length > 0) {
-            uint32_t cp = [chars characterAtIndex:0];
-            handle_key_fn(KC_CODEPOINT, mods, et, cp);
+        uint32_t cp = firstScalar([event charactersByApplyingModifiers:0]);
+        uint32_t shifted = firstScalar(
+            [event charactersByApplyingModifiers:NSEventModifierFlagShift]);
+        uint32_t base = attyx_macos_standard_codepoint(event.keyCode, 0);
+        if (cp == 0) cp = base;
+        if (shifted == cp) shifted = 0;
+        if (base == cp) base = 0;
+        if (cp != 0) {
+            AttyxExtendedKeyHandler ext_handler = g_popup_active
+                ? attyx_popup_handle_key_ext
+                : attyx_handle_key_ext;
+            ext_handler(KC_CODEPOINT, mods, et, cp, shifted, base, NULL, 0);
             return YES;
         }
         if (ctrl) return YES;

@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFile(.{ .file = b.path("src/vendor/stb_image_impl.c"), .flags = &.{} });
     mod.addCSourceFile(.{ .file = b.path("src/vendor/jebp_impl.c"), .flags = &.{} });
     mod.addIncludePath(b.path("src/vendor"));
+    mod.addIncludePath(b.path("src/app"));
     mod.linkSystemLibrary("c", .{});
     // zlib for Kitty graphics o=z compression — not available on Windows cross-compile yet.
     if (target.result.os.tag != .windows) {

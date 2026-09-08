@@ -8,7 +8,9 @@ const KeyCode = ke.KeyCode;
 // Kitty flag constants (mirror key_encode.zig internal constants)
 const KITTY_DISAMBIGUATE: u5 = 1;
 const KITTY_EVENT_TYPES: u5 = 2;
+const KITTY_ALTERNATE_KEYS: u5 = 4;
 const KITTY_ALL_KEYS: u5 = 8;
+const KITTY_ASSOCIATED_TEXT: u5 = 16;
 
 // ---------------------------------------------------------------------------
 // xterm encoding
@@ -68,6 +70,14 @@ test "xterm: unmodified home" {
     try testing.expectEqualStrings("\x1b[H", r);
 }
 
+test "xterm: home and end honor application cursor mode" {
+    var buf: [128]u8 = undefined;
+    const home = encodeKey(.{ .key = .home }, .{ .cursor_keys_app = true }, &buf);
+    try testing.expectEqualStrings("\x1bOH", home);
+    const end = encodeKey(.{ .key = .end }, .{ .cursor_keys_app = true }, &buf);
+    try testing.expectEqualStrings("\x1bOF", end);
+}
+
 test "xterm: F1 unmodified" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(.{ .key = .f1 }, .{}, &buf);
@@ -78,6 +88,12 @@ test "xterm: F1 with shift" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(.{ .key = .f1, .mods = .{ .shift = true } }, .{}, &buf);
     try testing.expectEqualStrings("\x1b[1;2P", r);
+}
+
+test "xterm: modified F3 avoids cursor-position-report ambiguity" {
+    var buf: [128]u8 = undefined;
+    const r = encodeKey(.{ .key = .f3, .mods = .{ .shift = true } }, .{}, &buf);
+    try testing.expectEqualStrings("\x1b[13;2~", r);
 }
 
 test "xterm: F5 unmodified" {
@@ -197,24 +213,24 @@ test "xterm: insert unmodified" {
 // Kitty encoding
 // ---------------------------------------------------------------------------
 
-test "kitty disambiguate: plain 'a' uses CSI u" {
+test "kitty disambiguate: plain 'a' remains UTF-8 text" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .codepoint, .codepoint = 'a' },
         .{ .kitty_flags = KITTY_DISAMBIGUATE },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[97u", r);
+    try testing.expectEqualStrings("a", r);
 }
 
-test "kitty disambiguate: shift+a uses CSI u" {
+test "kitty disambiguate: shift+a remains UTF-8 text" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .codepoint, .codepoint = 'A', .mods = .{ .shift = true } },
         .{ .kitty_flags = KITTY_DISAMBIGUATE },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[65;2u", r);
+    try testing.expectEqualStrings("A", r);
 }
 
 test "kitty disambiguate: arrow keys still use traditional" {
@@ -227,14 +243,14 @@ test "kitty disambiguate: arrow keys still use traditional" {
     try testing.expectEqualStrings("\x1b[A", r);
 }
 
-test "kitty disambiguate: enter uses CSI u" {
+test "kitty disambiguate: enter keeps legacy encoding" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .enter },
         .{ .kitty_flags = KITTY_DISAMBIGUATE },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[13u", r);
+    try testing.expectEqualStrings("\r", r);
 }
 
 test "kitty disambiguate: escape uses CSI u" {
@@ -247,34 +263,34 @@ test "kitty disambiguate: escape uses CSI u" {
     try testing.expectEqualStrings("\x1b[27u", r);
 }
 
-test "kitty event_types: release event encodes" {
+test "kitty event_types: text release is suppressed without all_keys" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .codepoint, .codepoint = 'a', .event_type = .release },
         .{ .kitty_flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[97;1:3u", r);
+    try testing.expectEqual(@as(usize, 0), r.len);
 }
 
-test "kitty event_types: repeat event encodes" {
+test "kitty event_types: text repeat remains UTF-8 without all_keys" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .codepoint, .codepoint = 'a', .event_type = .repeat },
         .{ .kitty_flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[97;1:2u", r);
+    try testing.expectEqualStrings("a", r);
 }
 
-test "kitty all_keys: arrow uses CSI u" {
+test "kitty all_keys: arrow keeps canonical functional encoding" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .up },
         .{ .kitty_flags = KITTY_ALL_KEYS },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[57419u", r);
+    try testing.expectEqualStrings("\x1b[A", r);
 }
 
 test "kitty all_keys: ctrl+a uses CSI u with mods" {
@@ -297,44 +313,139 @@ test "kitty: without event_types flag, release is ignored" {
     try testing.expectEqual(@as(usize, 0), r.len);
 }
 
-test "kitty disambiguate: tab uses CSI u" {
+test "kitty disambiguate: tab keeps legacy encoding" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .tab },
         .{ .kitty_flags = KITTY_DISAMBIGUATE },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[9u", r);
+    try testing.expectEqualStrings("\t", r);
 }
 
-test "kitty disambiguate: backspace uses CSI u" {
+test "kitty disambiguate: backspace keeps legacy encoding" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .backspace },
         .{ .kitty_flags = KITTY_DISAMBIGUATE },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[127u", r);
+    try testing.expectEqualStrings("\x7f", r);
 }
 
-test "kitty all_keys: F1 uses CSI u" {
+test "kitty all_keys: F1 keeps canonical functional encoding" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .f1 },
         .{ .kitty_flags = KITTY_ALL_KEYS },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[57364u", r);
+    try testing.expectEqualStrings("\x1b[P", r);
 }
 
-test "kitty all_keys: shift+F5 uses CSI u with mods" {
+test "kitty all_keys: shift+F5 keeps canonical tilde encoding" {
     var buf: [128]u8 = undefined;
     const r = encodeKey(
         .{ .key = .f5, .mods = .{ .shift = true } },
         .{ .kitty_flags = KITTY_ALL_KEYS },
         &buf,
     );
-    try testing.expectEqualStrings("\x1b[57368;2u", r);
+    try testing.expectEqualStrings("\x1b[15;2~", r);
+}
+
+test "kitty all_keys: Insert keeps canonical tilde encoding" {
+    var buf: [128]u8 = undefined;
+    const r = encodeKey(.{ .key = .insert }, .{ .kitty_flags = KITTY_ALL_KEYS }, &buf);
+    try testing.expectEqualStrings("\x1b[2~", r);
+}
+
+test "kitty all_keys: unshifted identity, alternates, and text are serialized" {
+    var buf: [128]u8 = undefined;
+    const flags = KITTY_ALTERNATE_KEYS | KITTY_ALL_KEYS | KITTY_ASSOCIATED_TEXT;
+    const r = encodeKey(
+        .{
+            .key = .codepoint,
+            .codepoint = 'a',
+            .shifted_codepoint = 'A',
+            .base_codepoint = 'q',
+            .text = "A",
+            .mods = .{ .shift = true },
+        },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[97:65:113;2;65u", r);
+}
+
+test "kitty associated text: pure IME text uses key zero" {
+    var buf: [128]u8 = undefined;
+    const flags = KITTY_ALL_KEYS | KITTY_ASSOCIATED_TEXT;
+    const r = encodeKey(
+        .{ .key = .codepoint, .text = "å" },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[0;;229u", r);
+}
+
+test "kitty associated text: control and invalid UTF-8 are omitted safely" {
+    var buf: [128]u8 = undefined;
+    const flags = KITTY_ALL_KEYS | KITTY_ASSOCIATED_TEXT;
+
+    const control = encodeKey(
+        .{ .key = .codepoint, .codepoint = 'a', .text = "\x01" },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[97u", control);
+
+    const invalid = encodeKey(
+        .{ .key = .codepoint, .codepoint = 'a', .text = "\xFF" },
+        .{ .kitty_flags = flags },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[97u", invalid);
+}
+
+test "kitty disambiguate: control text metadata cannot bypass CSI-u" {
+    var buf: [128]u8 = undefined;
+    const r = encodeKey(
+        .{
+            .key = .codepoint,
+            .codepoint = 'a',
+            .text = "\x01",
+            .mods = .{ .ctrl = true },
+        },
+        .{ .kitty_flags = KITTY_DISAMBIGUATE },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[97;5u", r);
+}
+
+test "kitty all_keys: modifier keys are reportable" {
+    var buf: [128]u8 = undefined;
+    const r = encodeKey(
+        .{ .key = .left_shift },
+        .{ .kitty_flags = KITTY_ALL_KEYS },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[57441u", r);
+}
+
+test "kitty disambiguate: shifted Enter and Tab use CSI u" {
+    var buf: [128]u8 = undefined;
+    const enter = encodeKey(
+        .{ .key = .enter, .mods = .{ .shift = true } },
+        .{ .kitty_flags = KITTY_DISAMBIGUATE },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[13;2u", enter);
+    const tab = encodeKey(
+        .{ .key = .tab, .mods = .{ .shift = true } },
+        .{ .kitty_flags = KITTY_DISAMBIGUATE },
+        &buf,
+    );
+    try testing.expectEqualStrings("\x1b[9;2u", tab);
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +493,23 @@ test "kitty flags: pop more than stack" {
     try testing.expectEqual(@as(u5, 0), state.kittyFlags());
 }
 
+test "kitty flags: full stack evicts the oldest entry" {
+    const alloc = std.testing.allocator;
+    const TerminalState = @import("state.zig").TerminalState;
+    var state = try TerminalState.init(alloc, 4, 10, 100);
+    defer state.deinit();
+
+    for (1..17) |flags| {
+        state.apply(.{ .kitty_push_flags = @intCast(flags) });
+    }
+    try testing.expectEqual(@as(u5, 16), state.kittyFlags());
+
+    state.apply(.{ .kitty_push_flags = 17 });
+    try testing.expectEqual(@as(u5, 17), state.kittyFlags());
+    state.apply(.{ .kitty_pop_flags = 15 });
+    try testing.expectEqual(@as(u5, 2), state.kittyFlags());
+}
+
 test "kitty flags: query response" {
     const alloc = std.testing.allocator;
     const TerminalState = @import("state.zig").TerminalState;
@@ -394,7 +522,7 @@ test "kitty flags: query response" {
     try testing.expectEqualStrings("\x1b[?5u", resp);
 }
 
-test "kitty flags: reset on alt screen enter" {
+test "kitty flags: main and alternate screens keep independent stacks" {
     const alloc = std.testing.allocator;
     const TerminalState = @import("state.zig").TerminalState;
     var state = try TerminalState.init(alloc, 4, 10, 100);
@@ -405,6 +533,15 @@ test "kitty flags: reset on alt screen enter" {
 
     state.apply(.enter_alt_screen);
     try testing.expectEqual(@as(u5, 0), state.kittyFlags());
+
+    state.apply(.{ .kitty_push_flags = 9 });
+    try testing.expectEqual(@as(u5, 9), state.kittyFlags());
+
+    state.apply(.leave_alt_screen);
+    try testing.expectEqual(@as(u5, 3), state.kittyFlags());
+
+    state.apply(.enter_alt_screen);
+    try testing.expectEqual(@as(u5, 9), state.kittyFlags());
 }
 
 // ---------------------------------------------------------------------------

@@ -39,6 +39,8 @@ fn swapBuffers(self: *TerminalState) void {
     std.mem.swap(usize, &self.scroll_bottom, &self.inactive_scroll_bottom);
     std.mem.swap(?SavedCursor, &self.saved_cursor, &self.inactive_saved_cursor);
     std.mem.swap(u32, &self.pen_link_id, &self.inactive_pen_link_id);
+    std.mem.swap([16]u5, &self.kitty_kbd_flags, &self.inactive_kitty_kbd_flags);
+    std.mem.swap(u5, &self.kitty_kbd_stack_len, &self.inactive_kitty_kbd_stack_len);
 }
 
 pub fn enterAltScreen(self: *TerminalState) void {
@@ -57,7 +59,6 @@ pub fn enterAltScreen(self: *TerminalState) void {
     self.wrap_next = false;
     self.alt_active = true;
     self.ring.layout_gen +%= 1; // screen content swapped → invalidate --since cursors
-    self.kittyResetFlags();
     self.dirty.markAll(self.ring.screen_rows);
 }
 
@@ -66,6 +67,5 @@ pub fn leaveAltScreen(self: *TerminalState) void {
     swapBuffers(self);
     self.alt_active = false;
     self.ring.layout_gen +%= 1; // screen content swapped back → invalidate cursors
-    self.kittyResetFlags();
     self.dirty.markAll(self.ring.screen_rows);
 }
